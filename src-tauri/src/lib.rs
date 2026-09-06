@@ -1,11 +1,13 @@
 use staq::{Staq, Task};
-use std::sync::Mutex;
+use state::AppState;
+use tauri::Manager;
 
+mod database;
 pub mod staq;
+pub mod state;
 
-struct AppState {
-    staq: Staq,
-}
+#[cfg(test)]
+mod persistence_tests;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -14,52 +16,76 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-fn get_staq(state: tauri::State<Mutex<AppState>>) -> Result<Staq, String> {
-    let state = state
-        .lock()
-        .map_err(|_| "failed to lock application state".to_string())?;
-    Ok(state.staq.clone())
+async fn get_staq(state: tauri::State<'_, AppState>) -> Result<Staq, String> {
+    Ok(state.staq.lock().await.clone())
 }
 
 #[tauri::command]
-fn staq_push_to_queue(state: tauri::State<Mutex<AppState>>, item: String) -> Result<Staq, String> {
-    let mut state = state
-        .lock()
-        .map_err(|_| "failed to lock application state".to_string())?;
-    state.staq.push(item);
-    Ok(state.staq.clone())
+async fn staq_push_to_queue(
+    state: tauri::State<'_, AppState>,
+    item: String,
+) -> Result<Staq, String> {
+    state
+        .push(&item, database::Placement::Queue)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn staq_push_on_stack(state: tauri::State<Mutex<AppState>>, item: String) -> Result<Staq, String> {
-    let mut state = state
-        .lock()
-        .map_err(|_| "failed to lock application state".to_string())?;
-    state.staq.push_on_stack(item);
-    Ok(state.staq.clone())
+async fn staq_push_on_stack(
+    state: tauri::State<'_, AppState>,
+    item: String,
+) -> Result<Staq, String> {
+    state
+        .push(&item, database::Placement::Stack)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn staq_pop(state: tauri::State<Mutex<AppState>>) -> Result<Staq, String> {
-    let mut state = state
-        .lock()
-        .map_err(|_| "failed to lock application state".to_string())?;
-    state.staq.pop();
-    Ok(state.staq.clone())
+async fn staq_pop(state: tauri::State<'_, AppState>) -> Result<Staq, String> {
+    state.pop().await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn staq_peek(state: tauri::State<Mutex<AppState>>) -> Result<Option<Task>, String> {
-    let state = state
-        .lock()
-        .map_err(|_| "failed to lock application state".to_string())?;
-    Ok(state.staq.peek().cloned())
+async fn staq_peek(state: tauri::State<'_, AppState>) -> Result<Option<Task>, String> {
+    Ok(state.staq.lock().await.peek().cloned())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .manage(Mutex::new(AppState { staq: Staq::new() }))
+    let builder = tauri::Builder::default();
+
+    // Register before database setup so only the primary instance loads state.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window("main") {
+            if let Err(error) = window.show() {
+                eprintln!("failed to show main window: {error}");
+            }
+            if let Err(error) = window.unminimize() {
+                eprintln!("failed to restore main window: {error}");
+            }
+            if let Err(error) = window.set_focus() {
+                eprintln!("failed to focus main window: {error}");
+            }
+        }
+    }));
+
+    builder
+        .setup(|app| {
+            let app_data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&app_data_dir)?;
+
+            let database_path = app_data_dir.join("staq.sqlite3");
+            let state = tauri::async_runtime::block_on(async {
+                let pool = database::initialize(&database_path).await?;
+                AppState::load(pool).await
+            })?;
+            app.manage(state);
+
+            Ok(())
+        })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             greet,
