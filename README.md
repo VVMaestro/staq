@@ -1,4 +1,20 @@
-# Tauri + Vue + TypeScript
+# STAQ
+
+## License
+
+STAQ is proprietary freeware. Official, unmodified releases may be used free
+of charge for personal and internal business purposes. Redistribution, resale,
+modification, and source code reuse require separate written permission.
+See [LICENSE](LICENSE) for the full terms. Third-party components retain their
+own licenses.
+
+Приложение STAQ бесплатно для личного использования и внутреннего использования
+в организациях. Распространение, перепродажа, изменение программы и использование
+исходного кода в других проектах требуют отдельного письменного разрешения.
+Полные условия приведены в [LICENSE](LICENSE). Сторонние компоненты сохраняют
+свои лицензии.
+
+## Development
 
 This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
 

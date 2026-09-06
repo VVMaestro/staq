@@ -24,6 +24,10 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "licenseFile": "../LICENSE",
+    "resources": {
+      "../LICENSE": "LICENSE"
+    },
     "icon": [
       "icons/queue/32x32.png",
       "icons/queue/128x128.png",
