@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from "vue";
 import TaskCard from "./components/TaskCard.vue";
+import WindowChrome from "./components/WindowChrome.vue";
+import { useWindowFrame } from "./useWindowFrame";
 import {
   getStaq,
   popCurrentTask,
@@ -11,9 +13,23 @@ import {
 
 type TaskPriority = "regular" | "urgent";
 
+const windowFrame = useWindowFrame();
+const { enabled: customFrame, maximized, error: windowError } = windowFrame;
+const windowEvents = {
+  minimize: windowFrame.minimize,
+  toggleMaximize: windowFrame.toggleMaximize,
+  close: windowFrame.close,
+  resize: windowFrame.resize,
+};
+const frameClasses = computed(() => ({
+  'window-frame--custom': customFrame.value,
+  'window-frame--maximized': maximized.value,
+}));
+
 const staq = ref<StaqSnapshot>({ queue: [], stack: [] });
 const dialogRef = ref<HTMLDialogElement | null>(null);
 const inputRef = ref<HTMLInputElement | null>(null);
+let dialogTrigger: HTMLElement | null = null;
 const dialogMode = ref<TaskPriority>("regular");
 const taskTitle = ref("");
 const isLoading = ref(true);
@@ -64,6 +80,7 @@ async function openDialog(mode: TaskPriority) {
   commandError.value = null;
   dialogMode.value = mode;
   taskTitle.value = "";
+  dialogTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   dialogRef.value?.showModal();
   await nextTick();
   inputRef.value?.focus();
@@ -75,6 +92,9 @@ function closeDialog() {
 
 function resetForm() {
   taskTitle.value = "";
+  void nextTick(() => {
+    if (dialogTrigger?.isConnected) dialogTrigger.focus();
+  });
 }
 
 async function addTask() {
@@ -116,6 +136,28 @@ function handleDialogBackdrop(event: MouseEvent) {
   if (!isBusy.value && event.target === event.currentTarget) closeDialog();
 }
 
+function handleDialogCancel(event: Event) {
+  if (isBusy.value) event.preventDefault();
+}
+
+function handleDialogKeydown(event: KeyboardEvent) {
+  if (event.key !== "Tab") return;
+  const controls = dialogRef.value?.querySelectorAll<HTMLElement>(
+    "button:not(:disabled), input:not(:disabled)",
+  );
+  if (!controls?.length) return;
+  const first = controls[0];
+  const last = controls[controls.length - 1];
+  // Keep Tab inside the modal instead of handing focus to browser chrome.
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
 async function loadStaq() {
   if (isBusy.value) return;
 
@@ -136,165 +178,170 @@ onMounted(loadStaq);
 </script>
 
 <template>
-  <main class="app-shell">
-    <header class="app-header">
-      <div>
-        <p class="eyebrow">STAQ</p>
-        <h1>Текущие задачи</h1>
-      </div>
-
-      <div class="queue-summary" aria-live="polite">
-        <span v-if="hasLoaded">Задач: {{ tasks.length }}</span>
-        <span v-else>Загрузка…</span>
-        <span v-if="urgentCount" class="urgent-summary">Срочных: {{ urgentCount }}</span>
-      </div>
-    </header>
-
-    <section class="queue-workspace" aria-labelledby="queue-title">
-      <div class="section-heading">
+  <div class="window-frame" :class="frameClasses">
+    <WindowChrome v-if="customFrame" :maximized="maximized" v-on="windowEvents" />
+    <p v-if="windowError" class="window-error" role="alert">{{ windowError }}</p>
+    <main class="app-shell">
+      <header class="app-header">
         <div>
-          <p class="section-kicker">Первой выполняется верхняя</p>
-          <h2 id="queue-title">Очередь</h2>
-        </div>
-        <span class="flow-label" aria-hidden="true">FIFO + LIFO</span>
-      </div>
-
-      <button
-        class="add-control add-control--urgent"
-        type="button"
-        aria-label="Добавить срочную задачу в начало очереди"
-        :disabled="actionsDisabled"
-        @click="openDialog('urgent')"
-      >
-        <span class="add-icon" aria-hidden="true"></span>
-        <span>
-          <strong>Срочная задача</strong>
-          <small>добавить наверх</small>
-        </span>
-      </button>
-
-      <p v-if="commandError && hasLoaded" class="command-error" role="alert">
-        {{ commandError }}
-      </p>
-
-      <div class="queue-container" :aria-busy="isLoading || isBusy">
-        <div v-if="isLoading" class="empty-state" aria-live="polite">
-          <span class="empty-mark" aria-hidden="true">…</span>
-          <h3>Загружаем задачи</h3>
+          <h1 class="eyebrow">STAQ</h1>
         </div>
 
-        <div v-else-if="!hasLoaded" class="empty-state empty-state--error" role="alert">
-          <span class="empty-mark" aria-hidden="true">!</span>
-          <h3>Задачи недоступны</h3>
-          <p>{{ commandError }}</p>
-          <button class="retry-button" type="button" @click="loadStaq">Повторить</button>
+        <div class="queue-summary" aria-live="polite">
+          <div class="queue-summary__tasks" v-if="hasLoaded">
+            <span>Задач: {{ tasks.length }}</span>
+
+            <span v-if="urgentCount" class="urgent-summary">Срочных: {{ urgentCount }}</span>
+          </div>
+          <span v-else>Загрузка…</span>
+        </div>
+      </header>
+
+      <section class="queue-workspace" aria-labelledby="queue-title">
+        <button
+          class="add-control add-control--urgent"
+          type="button"
+          aria-label="Добавить срочную задачу в начало очереди"
+          :disabled="actionsDisabled"
+          @click="openDialog('urgent')"
+        >
+          <span class="add-icon" aria-hidden="true"></span>
+          <span>
+            <strong>Срочная задача</strong>
+            <small>добавить наверх</small>
+          </span>
+        </button>
+
+        <p v-if="commandError && hasLoaded" class="command-error" role="alert">
+          {{ commandError }}
+        </p>
+
+        <div class="queue-container" :aria-busy="isLoading || isBusy">
+          <div v-if="isLoading" class="empty-state" aria-live="polite">
+            <span class="empty-mark" aria-hidden="true">…</span>
+            <h3>Загружаем задачи</h3>
+          </div>
+
+          <div v-else-if="!hasLoaded" class="empty-state empty-state--error" role="alert">
+            <span class="empty-mark" aria-hidden="true">!</span>
+            <h3>Задачи недоступны</h3>
+            <p>{{ commandError }}</p>
+            <button class="retry-button" type="button" @click="loadStaq">Повторить</button>
+          </div>
+
+          <div v-else-if="tasks.length" class="task-list" aria-label="Список текущих задач">
+            <TransitionGroup
+              v-for="group in taskGroups"
+              :key="group.priority"
+              name="task"
+              tag="div"
+              class="task-group"
+              :class="[
+                `task-group--${group.priority}`,
+                { 'task-group--framed': group.framed },
+              ]"
+            >
+              <TaskCard
+                v-for="task in group.tasks"
+                :key="task.id"
+                :title="task.name"
+                :urgent="group.priority === 'urgent'"
+                :current="task.id === currentTaskId"
+                :busy="isBusy"
+                @complete="completeCurrentTask"
+              />
+            </TransitionGroup>
+          </div>
+
+          <div v-else class="empty-state">
+            <span class="empty-mark" aria-hidden="true">0</span>
+            <h3>Очередь свободна</h3>
+            <p>Добавьте первую задачу снизу или срочную — сверху.</p>
+          </div>
         </div>
 
-        <div v-else-if="tasks.length" class="task-list" aria-label="Список текущих задач">
-          <TransitionGroup
-            v-for="group in taskGroups"
-            :key="group.priority"
-            name="task"
-            tag="div"
-            class="task-group"
-            :class="[
-              `task-group--${group.priority}`,
-              { 'task-group--framed': group.framed },
-            ]"
-          >
-            <TaskCard
-              v-for="task in group.tasks"
-              :key="task.id"
-              :title="task.name"
-              :urgent="group.priority === 'urgent'"
-              :current="task.id === currentTaskId"
-              :busy="isBusy"
-              @complete="completeCurrentTask"
-            />
-          </TransitionGroup>
-        </div>
+        <button
+          class="add-control add-control--regular"
+          type="button"
+          aria-label="Добавить обычную задачу в конец очереди"
+          :disabled="actionsDisabled"
+          @click="openDialog('regular')"
+        >
+          <span class="add-icon" aria-hidden="true"></span>
+          <span>
+            <strong>Обычная задача</strong>
+            <small>добавить в конец</small>
+          </span>
+        </button>
+      </section>
 
-        <div v-else class="empty-state">
-          <span class="empty-mark" aria-hidden="true">0</span>
-          <h3>Очередь свободна</h3>
-          <p>Добавьте первую задачу снизу или срочную — сверху.</p>
-        </div>
-      </div>
-
-      <button
-        class="add-control add-control--regular"
-        type="button"
-        aria-label="Добавить обычную задачу в конец очереди"
-        :disabled="actionsDisabled"
-        @click="openDialog('regular')"
-      >
-        <span class="add-icon" aria-hidden="true"></span>
-        <span>
-          <strong>Обычная задача</strong>
-          <small>добавить в конец</small>
-        </span>
-      </button>
-    </section>
+    </main>
 
     <dialog
       ref="dialogRef"
       class="task-dialog"
+      :class="frameClasses"
       aria-labelledby="dialog-title"
       aria-describedby="dialog-description"
-      @click="handleDialogBackdrop"
+      @cancel="handleDialogCancel"
+      @keydown="handleDialogKeydown"
       @close="resetForm"
     >
-      <form class="dialog-card" @submit.prevent="addTask">
-        <div class="dialog-heading">
-          <span
-            class="dialog-mode-icon"
-            :class="{ 'dialog-mode-icon--urgent': dialogMode === 'urgent' }"
-            aria-hidden="true"
-          ></span>
-          <div>
-            <p class="dialog-kicker">
-              {{ dialogMode === "urgent" ? "Наверх стека" : "В конец очереди" }}
-            </p>
-            <h2 id="dialog-title">{{ dialogTitle }}</h2>
+      <WindowChrome v-if="customFrame" :maximized="maximized" v-on="windowEvents" />
+      <p v-if="windowError" class="window-error" role="alert">{{ windowError }}</p>
+      <div class="dialog-workspace" @click="handleDialogBackdrop">
+        <form class="dialog-card" @submit.prevent="addTask">
+          <div class="dialog-heading">
+            <span
+              class="dialog-mode-icon"
+              :class="{ 'dialog-mode-icon--urgent': dialogMode === 'urgent' }"
+              aria-hidden="true"
+            ></span>
+            <div>
+              <p class="dialog-kicker">
+                {{ dialogMode === "urgent" ? "Наверх стека" : "В конец очереди" }}
+              </p>
+              <h2 id="dialog-title">{{ dialogTitle }}</h2>
+            </div>
           </div>
-        </div>
 
-        <p id="dialog-description" class="dialog-description">{{ dialogHint }}</p>
+          <p id="dialog-description" class="dialog-description">{{ dialogHint }}</p>
 
-        <p v-if="commandError" class="dialog-error" role="alert">{{ commandError }}</p>
+          <p v-if="commandError" class="dialog-error" role="alert">{{ commandError }}</p>
 
-        <label for="task-title">Коротко опишите задачу</label>
-        <input
-          id="task-title"
-          ref="inputRef"
-          v-model="taskTitle"
-          type="text"
-          maxlength="160"
-          autocomplete="off"
-          placeholder="Например, ответить на письмо"
-        />
+          <label for="task-title">Коротко опишите задачу</label>
+          <input
+            id="task-title"
+            ref="inputRef"
+            v-model="taskTitle"
+            type="text"
+            maxlength="160"
+            autocomplete="off"
+            placeholder="Например, ответить на письмо"
+          />
 
-        <div class="dialog-actions">
-          <button
-            class="secondary-button"
-            type="button"
-            :disabled="isBusy"
-            @click="closeDialog"
-          >
-            Отмена
-          </button>
-          <button
-            class="primary-button"
-            :class="{ 'primary-button--urgent': dialogMode === 'urgent' }"
-            type="submit"
-            :disabled="!canSubmit"
-          >
-            {{ isBusy ? "Добавляем…" : "Добавить" }}
-          </button>
-        </div>
-      </form>
+          <div class="dialog-actions">
+            <button
+              class="secondary-button"
+              type="button"
+              :disabled="isBusy"
+              @click="closeDialog"
+            >
+              Отмена
+            </button>
+            <button
+              class="primary-button"
+              :class="{ 'primary-button--urgent': dialogMode === 'urgent' }"
+              type="submit"
+              :disabled="!canSubmit"
+            >
+              {{ isBusy ? "Добавляем…" : "Добавить" }}
+            </button>
+          </div>
+        </form>
+      </div>
     </dialog>
-  </main>
+  </div>
 </template>
 
 <style>
@@ -302,7 +349,7 @@ onMounted(loadStaq);
   font-family:
     Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #20251f;
-  background: #eef1eb;
+  background: transparent;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -322,10 +369,17 @@ onMounted(loadStaq);
   box-sizing: border-box;
 }
 
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}
+
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
   overflow: hidden;
 }
 
@@ -344,16 +398,43 @@ input:focus-visible {
   outline-offset: 2px;
 }
 
+.window-frame {
+  position: relative;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 7% 5%, rgba(255, 255, 255, 0.95), transparent 30%),
+    linear-gradient(145deg, #f5f6f2 0%, #e9ede6 100%);
+}
+
+.window-frame--custom {
+  border-radius: 10px;
+  clip-path: inset(0 round 10px);
+}
+
+.window-frame--maximized {
+  border-radius: 0;
+  clip-path: none;
+}
+
+.window-error {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 6px 14px;
+  color: var(--urgent-dark);
+  background: var(--urgent-soft);
+  font-size: 0.75rem;
+}
+
 .app-shell {
-  min-height: 100vh;
-  height: 100vh;
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 18px;
   padding: 24px clamp(20px, 6vw, 54px);
-  background:
-    radial-gradient(circle at 7% 5%, rgba(255, 255, 255, 0.95), transparent 30%),
-    linear-gradient(145deg, #f5f6f2 0%, #e9ede6 100%);
 }
 
 .app-header {
@@ -391,6 +472,12 @@ input:focus-visible {
   color: var(--muted);
   font-size: 0.78rem;
   font-weight: 700;
+}
+
+.queue-summary__tasks {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .urgent-summary {
@@ -661,29 +748,52 @@ input:focus-visible {
 }
 
 .task-dialog {
-  width: min(440px, calc(100vw - 36px));
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
   padding: 0;
   border: 0;
-  border-radius: 20px;
+  overflow: hidden;
   color: var(--ink);
   background: transparent;
-  box-shadow: 0 28px 90px rgba(30, 37, 29, 0.25);
 }
 
 .task-dialog::backdrop {
+  background: transparent;
+}
+
+.task-dialog[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.dialog-workspace {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  padding: 18px;
+  overflow: auto;
   background: rgba(31, 38, 30, 0.42);
   backdrop-filter: blur(4px);
 }
 
-.task-dialog[open] {
-  animation: dialog-in 180ms ease-out;
-}
-
 .dialog-card {
+  flex-shrink: 0;
+  width: min(440px, 100%);
+  margin: auto;
   padding: 24px;
   border: 1px solid rgba(255, 255, 255, 0.8);
   border-radius: 20px;
   background: #fbfcf9;
+  box-shadow: 0 28px 90px rgba(30, 37, 29, 0.25);
+}
+
+.task-dialog[open] .dialog-card {
+  animation: dialog-in 180ms ease-out;
 }
 
 .dialog-heading {

@@ -5,6 +5,8 @@ use tauri::Manager;
 mod database;
 pub mod staq;
 pub mod state;
+#[cfg(windows)]
+mod tray;
 
 #[cfg(test)]
 mod persistence_tests;
@@ -59,17 +61,7 @@ pub fn run() {
     // Register before database setup so only the primary instance loads state.
     #[cfg(desktop)]
     let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-        if let Some(window) = app.get_webview_window("main") {
-            if let Err(error) = window.show() {
-                eprintln!("failed to show main window: {error}");
-            }
-            if let Err(error) = window.unminimize() {
-                eprintln!("failed to restore main window: {error}");
-            }
-            if let Err(error) = window.set_focus() {
-                eprintln!("failed to focus main window: {error}");
-            }
-        }
+        show_main_window(app);
     }));
 
     builder
@@ -84,6 +76,11 @@ pub fn run() {
             })?;
             app.manage(state);
 
+            #[cfg(windows)]
+            if let Err(error) = tray::setup(app) {
+                eprintln!("failed to create system tray; close will exit the app: {error}");
+            }
+
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -97,4 +94,19 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(desktop)]
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        if let Err(error) = window.show() {
+            eprintln!("failed to show main window: {error}");
+        }
+        if let Err(error) = window.unminimize() {
+            eprintln!("failed to restore main window: {error}");
+        }
+        if let Err(error) = window.set_focus() {
+            eprintln!("failed to focus main window: {error}");
+        }
+    }
 }

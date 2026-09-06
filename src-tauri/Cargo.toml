@@ -29,6 +29,9 @@ tokio = { version = "1", features = ["sync"] }
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
 tauri-plugin-single-instance = "2"
 
+[target.'cfg(windows)'.dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+
 [dev-dependencies]
 tempfile = "3"
 
