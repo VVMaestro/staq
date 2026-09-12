@@ -76,6 +76,23 @@ pub fn run() {
             })?;
             app.manage(state);
 
+            #[cfg(target_os = "macos")]
+            {
+                let window = app
+                    .get_webview_window("main")
+                    .ok_or("main window missing")?;
+                let main_window = window.clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Preserve the WebView and unfinished input until an explicit Quit.
+                        api.prevent_close();
+                        if let Err(error) = main_window.hide() {
+                            eprintln!("failed to hide main window: {error}");
+                        }
+                    }
+                });
+            }
+
             #[cfg(windows)]
             if let Err(error) = tray::setup(app) {
                 eprintln!("failed to create system tray; close will exit the app: {error}");
@@ -92,8 +109,14 @@ pub fn run() {
             staq_pop,
             staq_peek
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, _event| {
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = _event {
+                show_main_window(_app);
+            }
+        });
 }
 
 #[cfg(desktop)]
