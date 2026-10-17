@@ -1,9 +1,11 @@
-import { onMounted, onUnmounted, ref } from "vue";
+import { onMounted, onUnmounted, ref, type InjectionKey } from "vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
 
 export type ResizeDirection = Parameters<Window["startResizeDragging"]>[0];
+export type WindowFrame = ReturnType<typeof useWindowFrame>;
+export const windowFrameKey: InjectionKey<WindowFrame> = Symbol("windowFrame");
 
 export function useWindowFrame() {
   const enabled = ref(false);

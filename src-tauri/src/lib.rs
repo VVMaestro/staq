@@ -1,5 +1,6 @@
+use database::{CreateStaqData, Placement};
 use staq::{Staq, Task};
-use state::AppState;
+use state::{AppState, TaskPushData};
 use tauri::Manager;
 
 mod database;
@@ -18,17 +19,30 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
-async fn get_staq(state: tauri::State<'_, AppState>) -> Result<Staq, String> {
-    Ok(state.staq.lock().await.clone())
+async fn get_staq(state: tauri::State<'_, AppState>, staq_id: Option<i64>) -> Result<Staq, String> {
+    let app_state: &AppState = state.inner();
+    let staq = app_state
+        .staq(staq_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let staq = staq.lock().await;
+
+    Ok(staq.clone())
+}
+
+#[tauri::command]
+async fn get_staqs(state: tauri::State<'_, AppState>) -> Result<Vec<Staq>, String> {
+    Ok(state.list_staqs().await)
 }
 
 #[tauri::command]
 async fn staq_push_to_queue(
     state: tauri::State<'_, AppState>,
-    item: String,
+    item: TaskPushData,
+    staq_id: Option<i64>,
 ) -> Result<Staq, String> {
     state
-        .push(&item, database::Placement::Queue)
+        .push(&item, Placement::Queue, staq_id)
         .await
         .map_err(|error| error.to_string())
 }
@@ -36,22 +50,51 @@ async fn staq_push_to_queue(
 #[tauri::command]
 async fn staq_push_on_stack(
     state: tauri::State<'_, AppState>,
-    item: String,
+    item: TaskPushData,
+    staq_id: Option<i64>,
 ) -> Result<Staq, String> {
     state
-        .push(&item, database::Placement::Stack)
+        .push(&item, Placement::Stack, staq_id)
         .await
         .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-async fn staq_pop(state: tauri::State<'_, AppState>) -> Result<Staq, String> {
-    state.pop().await.map_err(|error| error.to_string())
+async fn staq_pop(state: tauri::State<'_, AppState>, staq_id: Option<i64>) -> Result<Staq, String> {
+    state.pop(staq_id).await.map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-async fn staq_peek(state: tauri::State<'_, AppState>) -> Result<Option<Task>, String> {
-    Ok(state.staq.lock().await.peek().cloned())
+async fn staq_peek(
+    state: tauri::State<'_, AppState>,
+    staq_id: Option<i64>,
+) -> Result<Option<Task>, String> {
+    let staq = state
+        .staq(staq_id)
+        .await
+        .map_err(|error| error.to_string())?;
+    let staq = staq.lock().await;
+
+    Ok(staq.peek().cloned())
+}
+
+#[tauri::command]
+async fn staq_create(
+    state: tauri::State<'_, AppState>,
+    data: CreateStaqData,
+) -> Result<Staq, String> {
+    state
+        .create_staq(data)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn staq_delete(state: tauri::State<'_, AppState>, staq_id: i64) -> Result<(), String> {
+    state
+        .delete_staq(staq_id)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -104,10 +147,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             greet,
             get_staq,
+            get_staqs,
             staq_push_to_queue,
             staq_push_on_stack,
             staq_pop,
-            staq_peek
+            staq_peek,
+            staq_create,
+            staq_delete,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

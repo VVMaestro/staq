@@ -1,19 +1,29 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, onMounted, provide, ref, watch } from "vue";
+import AppDialog from "./components/AppDialog.vue";
+import StaqSwitcher from "./components/StaqSwitcher.vue";
 import TaskCard from "./components/TaskCard.vue";
 import WindowChrome from "./components/WindowChrome.vue";
-import { useWindowFrame } from "./useWindowFrame";
+import { useWindowFrame, windowFrameKey } from "./useWindowFrame";
 import {
-  getStaq,
+  DEFAULT_STAQ_ID,
+  createStaq,
+  deleteStaq,
+  getStaqs,
   popCurrentTask,
   pushOnStack,
   pushToQueue,
+  staqLabel,
+  staqTaskCount,
   type StaqSnapshot,
 } from "./staq";
 
 type TaskPriority = "regular" | "urgent";
 
+const SELECTED_STAQ_KEY = "staq.selectedStaqId";
+
 const windowFrame = useWindowFrame();
+provide(windowFrameKey, windowFrame);
 const { enabled: customFrame, maximized, error: windowError } = windowFrame;
 const windowEvents = {
   minimize: windowFrame.minimize,
@@ -26,12 +36,39 @@ const frameClasses = computed(() => ({
   'window-frame--maximized': maximized.value,
 }));
 
-const staq = ref<StaqSnapshot>({ queue: [], stack: [] });
-const dialogRef = ref<HTMLDialogElement | null>(null);
-const inputRef = ref<HTMLInputElement | null>(null);
-let dialogTrigger: HTMLElement | null = null;
+function readSelectedStaqId(): number {
+  try {
+    const value = Number(localStorage.getItem(SELECTED_STAQ_KEY));
+    return Number.isInteger(value) ? value : DEFAULT_STAQ_ID;
+  } catch {
+    return DEFAULT_STAQ_ID;
+  }
+}
+
+const emptyStaq: StaqSnapshot = {
+  id: DEFAULT_STAQ_ID,
+  name: null,
+  description: null,
+  queue: [],
+  stack: [],
+};
+
+const staqs = ref<StaqSnapshot[]>([]);
+const selectedStaqId = ref(readSelectedStaqId());
+const staq = computed(
+  () => staqs.value.find((item) => item.id === selectedStaqId.value) ?? emptyStaq,
+);
+
+const switcherRef = ref<InstanceType<typeof StaqSwitcher> | null>(null);
+const taskDialogRef = ref<InstanceType<typeof AppDialog> | null>(null);
+const createStaqDialogRef = ref<InstanceType<typeof AppDialog> | null>(null);
+const deleteStaqDialogRef = ref<InstanceType<typeof AppDialog> | null>(null);
+
 const dialogMode = ref<TaskPriority>("regular");
 const taskTitle = ref("");
+const staqName = ref("");
+const staqDescription = ref("");
+const staqToDeleteId = ref<number | null>(null);
 const isLoading = ref(true);
 const isBusy = ref(false);
 const hasLoaded = ref(false);
@@ -60,6 +97,12 @@ const actionsDisabled = computed(
 const canSubmit = computed(
   () => taskTitle.value.trim().length > 0 && !isBusy.value,
 );
+const canCreateStaq = computed(
+  () => staqName.value.trim().length > 0 && !isBusy.value,
+);
+const staqToDelete = computed(
+  () => staqs.value.find((item) => item.id === staqToDeleteId.value) ?? null,
+);
 const dialogTitle = computed(() =>
   dialogMode.value === "urgent" ? "Добавить срочную задачу" : "Добавить задачу",
 );
@@ -69,32 +112,41 @@ const dialogHint = computed(() =>
     : "Она встанет в конец очереди.",
 );
 
+watch(selectedStaqId, (id) => {
+  try {
+    localStorage.setItem(SELECTED_STAQ_KEY, String(id));
+  } catch {
+    // The selection is a convenience; the app works without storage.
+  }
+});
+
 function reportCommandError(message: string, error: unknown) {
   console.error(message, error);
   commandError.value = message;
 }
 
-async function openDialog(mode: TaskPriority) {
+function replaceStaq(updated: StaqSnapshot) {
+  staqs.value = staqs.value.map((item) => (item.id === updated.id ? updated : item));
+}
+
+function focusSwitcher() {
+  switcherRef.value?.focus();
+}
+
+function selectStaq(id: number) {
+  if (isBusy.value) return;
+
+  commandError.value = null;
+  selectedStaqId.value = id;
+}
+
+function openDialog(mode: TaskPriority) {
   if (actionsDisabled.value) return;
 
   commandError.value = null;
   dialogMode.value = mode;
   taskTitle.value = "";
-  dialogTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  dialogRef.value?.showModal();
-  await nextTick();
-  inputRef.value?.focus();
-}
-
-function closeDialog() {
-  dialogRef.value?.close();
-}
-
-function resetForm() {
-  taskTitle.value = "";
-  void nextTick(() => {
-    if (dialogTrigger?.isConnected) dialogTrigger.focus();
-  });
+  void taskDialogRef.value?.open();
 }
 
 async function addTask() {
@@ -105,11 +157,13 @@ async function addTask() {
   commandError.value = null;
 
   try {
-    staq.value =
+    const staqId = selectedStaqId.value;
+    replaceStaq(
       dialogMode.value === "urgent"
-        ? await pushOnStack(title)
-        : await pushToQueue(title);
-    closeDialog();
+        ? await pushOnStack(staqId, { name: title })
+        : await pushToQueue(staqId, { name: title }),
+    );
+    taskDialogRef.value?.close();
   } catch (error) {
     reportCommandError("Не удалось добавить задачу. Попробуйте ещё раз.", error);
   } finally {
@@ -124,7 +178,7 @@ async function completeCurrentTask() {
   commandError.value = null;
 
   try {
-    staq.value = await popCurrentTask();
+    replaceStaq(await popCurrentTask(selectedStaqId.value));
   } catch (error) {
     reportCommandError("Не удалось завершить задачу. Попробуйте ещё раз.", error);
   } finally {
@@ -132,40 +186,74 @@ async function completeCurrentTask() {
   }
 }
 
-function handleDialogBackdrop(event: MouseEvent) {
-  if (!isBusy.value && event.target === event.currentTarget) closeDialog();
+function openCreateStaqDialog() {
+  if (actionsDisabled.value) return;
+
+  commandError.value = null;
+  staqName.value = "";
+  staqDescription.value = "";
+  void createStaqDialogRef.value?.open(focusSwitcher);
 }
 
-function handleDialogCancel(event: Event) {
-  if (isBusy.value) event.preventDefault();
-}
+async function submitCreateStaq() {
+  const name = staqName.value.trim();
+  if (!name || isBusy.value) return;
 
-function handleDialogKeydown(event: KeyboardEvent) {
-  if (event.key !== "Tab") return;
-  const controls = dialogRef.value?.querySelectorAll<HTMLElement>(
-    "button:not(:disabled), input:not(:disabled)",
-  );
-  if (!controls?.length) return;
-  const first = controls[0];
-  const last = controls[controls.length - 1];
-  // Keep Tab inside the modal instead of handing focus to browser chrome.
-  if (event.shiftKey && document.activeElement === first) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && document.activeElement === last) {
-    event.preventDefault();
-    first.focus();
+  isBusy.value = true;
+  commandError.value = null;
+
+  try {
+    const description = staqDescription.value.trim();
+    const created = await createStaq({ name, description: description || undefined });
+    staqs.value = [...staqs.value, created];
+    selectedStaqId.value = created.id;
+    createStaqDialogRef.value?.close();
+  } catch (error) {
+    reportCommandError("Не удалось создать стек. Попробуйте ещё раз.", error);
+  } finally {
+    isBusy.value = false;
   }
 }
 
-async function loadStaq() {
+function openDeleteStaqDialog(target: StaqSnapshot) {
+  if (actionsDisabled.value || target.id === DEFAULT_STAQ_ID) return;
+
+  commandError.value = null;
+  staqToDeleteId.value = target.id;
+  void deleteStaqDialogRef.value?.open(focusSwitcher);
+}
+
+async function confirmDeleteStaq() {
+  const target = staqToDelete.value;
+  if (!target || isBusy.value) return;
+
+  isBusy.value = true;
+  commandError.value = null;
+
+  try {
+    await deleteStaq(target.id);
+    staqs.value = staqs.value.filter((item) => item.id !== target.id);
+    if (selectedStaqId.value === target.id) selectedStaqId.value = DEFAULT_STAQ_ID;
+    deleteStaqDialogRef.value?.close();
+  } catch (error) {
+    reportCommandError("Не удалось удалить стек. Попробуйте ещё раз.", error);
+  } finally {
+    isBusy.value = false;
+  }
+}
+
+async function loadStaqs() {
   if (isBusy.value) return;
 
   isLoading.value = true;
   commandError.value = null;
 
   try {
-    staq.value = await getStaq();
+    const loaded = await getStaqs();
+    staqs.value = loaded;
+    if (!loaded.some((item) => item.id === selectedStaqId.value)) {
+      selectedStaqId.value = DEFAULT_STAQ_ID;
+    }
     hasLoaded.value = true;
   } catch (error) {
     reportCommandError("Не удалось загрузить задачи из приложения.", error);
@@ -174,7 +262,7 @@ async function loadStaq() {
   }
 }
 
-onMounted(loadStaq);
+onMounted(loadStaqs);
 </script>
 
 <template>
@@ -183,18 +271,29 @@ onMounted(loadStaq);
     <p v-if="windowError" class="window-error" role="alert">{{ windowError }}</p>
     <main class="app-shell">
       <header class="app-header">
-        <div>
+        <div class="app-title">
           <h1 class="eyebrow">STAQ</h1>
-        </div>
 
-        <div class="queue-summary" aria-live="polite">
-          <div class="queue-summary__tasks" v-if="hasLoaded">
-            <span>Задач: {{ tasks.length }}</span>
+          <div class="queue-summary" aria-live="polite">
+            <div class="queue-summary__tasks" v-if="hasLoaded">
+              <span>Задач: {{ tasks.length }}</span>
 
-            <span v-if="urgentCount" class="urgent-summary">Срочных: {{ urgentCount }}</span>
+              <span v-if="urgentCount" class="urgent-summary">Срочных: {{ urgentCount }}</span>
+            </div>
+            <span v-else>Загрузка…</span>
           </div>
-          <span v-else>Загрузка…</span>
         </div>
+
+        <StaqSwitcher
+          ref="switcherRef"
+          class="app-switcher"
+          :staqs="staqs"
+          :selected-id="selectedStaqId"
+          :disabled="actionsDisabled"
+          @select="selectStaq"
+          @create="openCreateStaqDialog"
+          @delete="openDeleteStaqDialog"
+        />
       </header>
 
       <section class="queue-workspace" aria-labelledby="queue-title">
@@ -226,10 +325,16 @@ onMounted(loadStaq);
             <span class="empty-mark" aria-hidden="true">!</span>
             <h3>Задачи недоступны</h3>
             <p>{{ commandError }}</p>
-            <button class="retry-button" type="button" @click="loadStaq">Повторить</button>
+            <button class="retry-button" type="button" @click="loadStaqs">Повторить</button>
           </div>
 
-          <div v-else-if="tasks.length" class="task-list" aria-label="Список текущих задач">
+          <!-- Keyed by staq so switching replaces the list instead of animating every task. -->
+          <div
+            v-else-if="tasks.length"
+            :key="selectedStaqId"
+            class="task-list"
+            aria-label="Список текущих задач"
+          >
             <TransitionGroup
               v-for="group in taskGroups"
               :key="group.priority"
@@ -277,70 +382,170 @@ onMounted(loadStaq);
 
     </main>
 
-    <dialog
-      ref="dialogRef"
-      class="task-dialog"
-      :class="frameClasses"
-      aria-labelledby="dialog-title"
-      aria-describedby="dialog-description"
-      @cancel="handleDialogCancel"
-      @keydown="handleDialogKeydown"
-      @close="resetForm"
+    <AppDialog
+      ref="taskDialogRef"
+      :busy="isBusy"
+      labelledby="dialog-title"
+      describedby="dialog-description"
+      @close="taskTitle = ''"
     >
-      <WindowChrome v-if="customFrame" :maximized="maximized" v-on="windowEvents" />
-      <p v-if="windowError" class="window-error" role="alert">{{ windowError }}</p>
-      <div class="dialog-workspace" @click="handleDialogBackdrop">
-        <form class="dialog-card" @submit.prevent="addTask">
-          <div class="dialog-heading">
-            <span
-              class="dialog-mode-icon"
-              :class="{ 'dialog-mode-icon--urgent': dialogMode === 'urgent' }"
-              aria-hidden="true"
-            ></span>
-            <div>
-              <p class="dialog-kicker">
-                {{ dialogMode === "urgent" ? "Наверх стека" : "В конец очереди" }}
-              </p>
-              <h2 id="dialog-title">{{ dialogTitle }}</h2>
-            </div>
+      <form class="dialog-card" @submit.prevent="addTask">
+        <div class="dialog-heading">
+          <span
+            class="dialog-mode-icon"
+            :class="{ 'dialog-mode-icon--urgent': dialogMode === 'urgent' }"
+            aria-hidden="true"
+          ></span>
+          <div>
+            <p class="dialog-kicker">
+              {{ dialogMode === "urgent" ? "Наверх стека" : "В конец очереди" }}
+            </p>
+            <h2 id="dialog-title">{{ dialogTitle }}</h2>
           </div>
+        </div>
 
-          <p id="dialog-description" class="dialog-description">{{ dialogHint }}</p>
+        <p id="dialog-description" class="dialog-description">{{ dialogHint }}</p>
 
-          <p v-if="commandError" class="dialog-error" role="alert">{{ commandError }}</p>
+        <p v-if="commandError" class="dialog-error" role="alert">{{ commandError }}</p>
 
-          <label for="task-title">Коротко опишите задачу</label>
-          <input
-            id="task-title"
-            ref="inputRef"
-            v-model="taskTitle"
-            type="text"
-            maxlength="160"
-            autocomplete="off"
-            placeholder="Например, ответить на письмо"
-          />
+        <label for="task-title">Коротко опишите задачу</label>
+        <input
+          id="task-title"
+          v-model="taskTitle"
+          data-autofocus
+          type="text"
+          maxlength="160"
+          autocomplete="off"
+          placeholder="Например, ответить на письмо"
+        />
 
-          <div class="dialog-actions">
-            <button
-              class="secondary-button"
-              type="button"
-              :disabled="isBusy"
-              @click="closeDialog"
-            >
-              Отмена
-            </button>
-            <button
-              class="primary-button"
-              :class="{ 'primary-button--urgent': dialogMode === 'urgent' }"
-              type="submit"
-              :disabled="!canSubmit"
-            >
-              {{ isBusy ? "Добавляем…" : "Добавить" }}
-            </button>
+        <div class="dialog-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="isBusy"
+            @click="taskDialogRef?.close()"
+          >
+            Отмена
+          </button>
+          <button
+            class="primary-button"
+            :class="{ 'primary-button--urgent': dialogMode === 'urgent' }"
+            type="submit"
+            :disabled="!canSubmit"
+          >
+            {{ isBusy ? "Добавляем…" : "Добавить" }}
+          </button>
+        </div>
+      </form>
+    </AppDialog>
+
+    <AppDialog
+      ref="createStaqDialogRef"
+      :busy="isBusy"
+      labelledby="create-staq-title"
+      describedby="create-staq-description"
+      @close="staqName = ''; staqDescription = ''"
+    >
+      <form class="dialog-card" @submit.prevent="submitCreateStaq">
+        <div class="dialog-heading">
+          <span class="dialog-mode-icon" aria-hidden="true"></span>
+          <div>
+            <p class="dialog-kicker">Новый стек</p>
+            <h2 id="create-staq-title">Создать стек</h2>
           </div>
-        </form>
-      </div>
-    </dialog>
+        </div>
+
+        <p id="create-staq-description" class="dialog-description">
+          У стека своя очередь и свои срочные задачи.
+        </p>
+
+        <p v-if="commandError" class="dialog-error" role="alert">{{ commandError }}</p>
+
+        <label for="staq-name">Название</label>
+        <input
+          id="staq-name"
+          v-model="staqName"
+          data-autofocus
+          type="text"
+          maxlength="60"
+          autocomplete="off"
+          placeholder="Например, Работа"
+        />
+
+        <label class="dialog-field-label" for="staq-description">Описание (необязательно)</label>
+        <input
+          id="staq-description"
+          v-model="staqDescription"
+          type="text"
+          maxlength="160"
+          autocomplete="off"
+        />
+
+        <div class="dialog-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="isBusy"
+            @click="createStaqDialogRef?.close()"
+          >
+            Отмена
+          </button>
+          <button class="primary-button" type="submit" :disabled="!canCreateStaq">
+            {{ isBusy ? "Создаём…" : "Создать" }}
+          </button>
+        </div>
+      </form>
+    </AppDialog>
+
+    <AppDialog
+      ref="deleteStaqDialogRef"
+      :busy="isBusy"
+      labelledby="delete-staq-title"
+      describedby="delete-staq-description"
+      @close="staqToDeleteId = null"
+    >
+      <form class="dialog-card" @submit.prevent="confirmDeleteStaq">
+        <div class="dialog-heading">
+          <span class="dialog-mode-icon dialog-mode-icon--danger" aria-hidden="true"></span>
+          <div>
+            <p class="dialog-kicker dialog-kicker--danger">Удаление</p>
+            <h2 id="delete-staq-title">
+              Удалить стек «{{ staqToDelete ? staqLabel(staqToDelete) : "" }}»?
+            </h2>
+          </div>
+        </div>
+
+        <p id="delete-staq-description" class="dialog-description">
+          <template v-if="staqToDelete && staqTaskCount(staqToDelete)">
+            Вместе с ним будут удалены задачи: {{ staqTaskCount(staqToDelete) }}.
+          </template>
+          <template v-else>В стеке нет задач.</template>
+          Это действие нельзя отменить.
+        </p>
+
+        <p v-if="commandError" class="dialog-error" role="alert">{{ commandError }}</p>
+
+        <div class="dialog-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            data-autofocus
+            :disabled="isBusy"
+            @click="deleteStaqDialogRef?.close()"
+          >
+            Отмена
+          </button>
+          <button
+            class="primary-button primary-button--urgent"
+            type="submit"
+            :disabled="isBusy || !staqToDelete"
+          >
+            {{ isBusy ? "Удаляем…" : "Удалить" }}
+          </button>
+        </div>
+      </form>
+    </AppDialog>
   </div>
 </template>
 
@@ -439,9 +644,9 @@ input:focus-visible {
 
 .app-header {
   display: flex;
-  align-items: flex-end;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 24px;
+  gap: 16px;
   max-width: 680px;
   width: 100%;
   margin: 0 auto;
@@ -458,6 +663,19 @@ input:focus-visible {
   text-transform: uppercase;
 }
 
+.app-title {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.app-switcher {
+  flex: 1 1 200px;
+  max-width: 260px;
+  margin-top: 6px;
+}
+
 .app-header h1 {
   margin: 0;
   font-size: clamp(1.45rem, 4vw, 2rem);
@@ -466,6 +684,7 @@ input:focus-visible {
 }
 
 .queue-summary {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -835,6 +1054,20 @@ input:focus-visible {
   background: var(--urgent-soft);
 }
 
+.dialog-mode-icon--danger {
+  color: var(--urgent);
+  background: var(--urgent-soft);
+}
+
+.dialog-mode-icon--danger::before,
+.dialog-mode-icon--danger::after {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.dialog-kicker--danger {
+  color: var(--urgent-dark);
+}
+
 .dialog-description {
   margin: 16px 0 18px;
   color: var(--muted);
@@ -851,6 +1084,10 @@ input:focus-visible {
   color: #4d554b;
   font-size: 0.72rem;
   font-weight: 750;
+}
+
+.dialog-card .dialog-field-label {
+  margin-top: 14px;
 }
 
 .dialog-card input {
@@ -943,13 +1180,10 @@ input:focus-visible {
 }
 
 @media (max-width: 520px) {
-  .app-header {
-    align-items: flex-start;
-  }
-
-  .queue-summary {
+  .queue-summary__tasks {
     flex-direction: column;
-    align-items: flex-end;
+    align-items: flex-start;
+    gap: 4px;
   }
 
   .queue-workspace {
