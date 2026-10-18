@@ -120,12 +120,13 @@ jobs:
           distribution: temurin
           java-version: 17
 
+      # The default package list includes the removed 'tools' package, which fails on current sdkmanager.
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools ndk;27.2.12479018
 
-      - name: Install NDK and build tools
-        run: |
-          sdkmanager "ndk;27.2.12479018" "build-tools;35.0.0"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+      - name: Set NDK_HOME
+        run: echo "NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
 
       - uses: oven-sh/setup-bun@v2
         with:
