@@ -2,6 +2,7 @@
 import { computed, inject, nextTick, ref } from "vue";
 import WindowChrome from "./WindowChrome.vue";
 import { windowFrameKey } from "../useWindowFrame";
+import { pushBackHandler } from "../platform";
 
 const props = defineProps<{
   busy: boolean;
@@ -29,6 +30,7 @@ const frameClasses = computed(() => ({
 
 const dialogRef = ref<HTMLDialogElement | null>(null);
 let restoreFocus: (() => void) | null = null;
+let releaseBack: (() => void) | null = null;
 
 async function open(onClosed?: () => void) {
   const trigger = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -36,6 +38,9 @@ async function open(onClosed?: () => void) {
     if (trigger?.isConnected) trigger.focus();
   });
   dialogRef.value?.showModal();
+  releaseBack ??= pushBackHandler(() => {
+    if (!props.busy) close();
+  });
   await nextTick();
   dialogRef.value?.querySelector<HTMLElement>("[data-autofocus]")?.focus();
 }
@@ -45,6 +50,8 @@ function close() {
 }
 
 function handleClose() {
+  releaseBack?.();
+  releaseBack = null;
   emit("close");
   const focus = restoreFocus;
   restoreFocus = null;

@@ -2,6 +2,7 @@ import { onMounted, onUnmounted, ref, type InjectionKey } from "vue";
 import { isTauri } from "@tauri-apps/api/core";
 import { getCurrentWindow, type Window } from "@tauri-apps/api/window";
 import type { UnlistenFn } from "@tauri-apps/api/event";
+import { isMobile } from "./platform";
 
 export type ResizeDirection = Parameters<Window["startResizeDragging"]>[0];
 export type WindowFrame = ReturnType<typeof useWindowFrame>;
@@ -11,7 +12,8 @@ export function useWindowFrame() {
   const enabled = ref(false);
   const maximized = ref(false);
   const error = ref<string | null>(null);
-  const appWindow = isTauri() ? getCurrentWindow() : null;
+  // Mobile has no desktop window to decorate, move or resize.
+  const appWindow = isTauri() && !isMobile ? getCurrentWindow() : null;
   let disposed = false;
   let unlisten: UnlistenFn | undefined;
   let revision = 0;

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { DEFAULT_STAQ_ID, staqLabel, staqTaskCount, type StaqSnapshot } from "../staq";
+import { pushBackHandler } from "../platform";
 
 const props = defineProps<{
   staqs: StaqSnapshot[];
@@ -18,6 +19,7 @@ const isOpen = ref(false);
 const rootRef = ref<HTMLElement | null>(null);
 const buttonRef = ref<HTMLButtonElement | null>(null);
 const menuRef = ref<HTMLElement | null>(null);
+let releaseBack: (() => void) | null = null;
 
 const currentLabel = computed(() => {
   const current = props.staqs.find((staq) => staq.id === props.selectedId);
@@ -103,8 +105,14 @@ function requestDelete(staq: StaqSnapshot) {
 }
 
 watch(isOpen, (open) => {
-  if (open) document.addEventListener("pointerdown", handleOutsidePointer);
-  else document.removeEventListener("pointerdown", handleOutsidePointer);
+  if (open) {
+    document.addEventListener("pointerdown", handleOutsidePointer);
+    releaseBack = pushBackHandler(() => closeMenu());
+  } else {
+    document.removeEventListener("pointerdown", handleOutsidePointer);
+    releaseBack?.();
+    releaseBack = null;
+  }
 });
 
 watch(
@@ -114,7 +122,10 @@ watch(
   },
 );
 
-onBeforeUnmount(() => document.removeEventListener("pointerdown", handleOutsidePointer));
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", handleOutsidePointer);
+  releaseBack?.();
+});
 
 defineExpose({ focus: () => buttonRef.value?.focus() });
 </script>
@@ -229,10 +240,16 @@ defineExpose({ focus: () => buttonRef.value?.focus() });
   transition: background-color 150ms ease, border-color 150ms ease;
 }
 
-.switcher-button:hover:not(:disabled),
 .switcher-button[aria-expanded="true"] {
   border-color: #b9cdbd;
   background: #fff;
+}
+
+@media (hover: hover) {
+  .switcher-button:hover:not(:disabled) {
+    border-color: #b9cdbd;
+    background: #fff;
+  }
 }
 
 .switcher-button:disabled {
@@ -313,9 +330,11 @@ defineExpose({ focus: () => buttonRef.value?.focus() });
   text-align: left;
 }
 
-.menu-item:hover,
-.menu-delete:hover {
-  background: rgba(47, 107, 78, 0.08);
+@media (hover: hover) {
+  .menu-item:hover,
+  .menu-delete:hover {
+    background: rgba(47, 107, 78, 0.08);
+  }
 }
 
 .menu-check {
@@ -354,9 +373,11 @@ defineExpose({ focus: () => buttonRef.value?.focus() });
   color: var(--muted);
 }
 
-.menu-delete:hover {
-  color: var(--urgent-dark);
-  background: var(--urgent-soft);
+@media (hover: hover) {
+  .menu-delete:hover {
+    color: var(--urgent-dark);
+    background: var(--urgent-soft);
+  }
 }
 
 .menu-separator {

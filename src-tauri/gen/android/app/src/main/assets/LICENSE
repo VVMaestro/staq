@@ -1,0 +1,43 @@
+STAQ Freeware License
+Version 1.0
+
+Copyright (c) 2026 VVMaestro and other applicable copyright holders.
+All rights reserved, except as expressly granted below.
+
+1. Free use
+You may download, install, run, and make backup copies of official, unmodified
+STAQ application releases free of charge for personal or internal business use.
+This permission does not transfer ownership of the software or its source code.
+
+2. Restrictions
+Unless separately authorized in writing by the applicable copyright holders,
+you may not sell, sublicense, redistribute, or bundle the software with another
+product; modify the software or distribute modified versions; or copy, adapt,
+or incorporate its source code into another project or product. You may share
+links to the official repository and releases. Keep copyright and license
+notices intact in all copies you are permitted to make.
+
+3. Source code and hosting platforms
+Making source code publicly visible does not grant permission to reuse, modify,
+build, or distribute it. Rights granted by the terms of the hosting platform,
+including viewing and forking within GitHub, are not restricted by this license.
+Exceptions and rights that cannot lawfully be restricted remain unaffected.
+
+4. Third-party components
+Third-party libraries, code, and assets remain governed by their respective
+licenses. This license does not replace those licenses or restrict rights they
+grant. It applies only to material the applicable copyright holders are entitled
+to license under these terms.
+
+5. No warranty; limitation of liability
+To the maximum extent permitted by applicable law, the software is provided
+"AS IS", without warranties of any kind, express or implied, including
+merchantability, fitness for a particular purpose, and noninfringement.
+To the maximum extent permitted by applicable law, the copyright holders are
+not liable for claims, damages, or other liability arising from the software
+or its use, whether in contract, tort, or otherwise. Mandatory statutory rights
+are unaffected.
+
+6. Additional permissions
+For permissions beyond this license, contact the project maintainer through
+the official repository: https://github.com/VVMaestro/staq

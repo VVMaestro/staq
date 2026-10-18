@@ -4,6 +4,7 @@ import AppDialog from "./components/AppDialog.vue";
 import StaqSwitcher from "./components/StaqSwitcher.vue";
 import TaskCard from "./components/TaskCard.vue";
 import WindowChrome from "./components/WindowChrome.vue";
+import { useUpdater } from "./useUpdater";
 import { useWindowFrame, windowFrameKey } from "./useWindowFrame";
 import {
   DEFAULT_STAQ_ID,
@@ -63,6 +64,15 @@ const switcherRef = ref<InstanceType<typeof StaqSwitcher> | null>(null);
 const taskDialogRef = ref<InstanceType<typeof AppDialog> | null>(null);
 const createStaqDialogRef = ref<InstanceType<typeof AppDialog> | null>(null);
 const deleteStaqDialogRef = ref<InstanceType<typeof AppDialog> | null>(null);
+const updateDialogRef = ref<InstanceType<typeof AppDialog> | null>(null);
+
+const updater = useUpdater();
+const {
+  update: availableUpdate,
+  installing: isInstallingUpdate,
+  progress: updateProgress,
+  error: updateError,
+} = updater;
 
 const dialogMode = ref<TaskPriority>("regular");
 const taskTitle = ref("");
@@ -262,7 +272,14 @@ async function loadStaqs() {
   }
 }
 
-onMounted(loadStaqs);
+async function offerUpdate() {
+  if (await updater.checkForUpdate()) void updateDialogRef.value?.open();
+}
+
+onMounted(async () => {
+  await loadStaqs();
+  void offerUpdate();
+});
 </script>
 
 <template>
@@ -546,6 +563,52 @@ onMounted(loadStaqs);
         </div>
       </form>
     </AppDialog>
+
+    <AppDialog
+      ref="updateDialogRef"
+      :busy="isInstallingUpdate"
+      labelledby="update-title"
+      describedby="update-description"
+      @close="updateError = null"
+    >
+      <form class="dialog-card" @submit.prevent="updater.install">
+        <div class="dialog-heading">
+          <span class="dialog-mode-icon" aria-hidden="true"></span>
+          <div>
+            <p class="dialog-kicker">Обновление</p>
+            <h2 id="update-title">Доступна версия {{ availableUpdate?.version }}</h2>
+          </div>
+        </div>
+
+        <p id="update-description" class="dialog-description">
+          Приложение скачает обновление и перезапустится. Задачи сохранятся.
+        </p>
+
+        <p v-if="updateError" class="dialog-error" role="alert">{{ updateError }}</p>
+
+        <div class="dialog-actions">
+          <button
+            class="secondary-button"
+            type="button"
+            :disabled="isInstallingUpdate"
+            @click="updateDialogRef?.close()"
+          >
+            Позже
+          </button>
+          <button
+            class="primary-button"
+            type="submit"
+            data-autofocus
+            :disabled="isInstallingUpdate"
+          >
+            <template v-if="isInstallingUpdate">
+              Обновляем…{{ updateProgress === null ? "" : ` ${updateProgress}%` }}
+            </template>
+            <template v-else>Обновить</template>
+          </button>
+        </div>
+      </form>
+    </AppDialog>
   </div>
 </template>
 
@@ -609,6 +672,8 @@ input:focus-visible {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* Keep content clear of the status and navigation bars on edge-to-edge mobile screens. */
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   background:
     radial-gradient(circle at 7% 5%, rgba(255, 255, 255, 0.95), transparent 30%),
     linear-gradient(145deg, #f5f6f2 0%, #e9ede6 100%);
@@ -811,13 +876,15 @@ input:focus-visible {
   background: var(--urgent-soft);
 }
 
-.add-control:hover:not(:disabled) .add-icon {
-  transform: scale(1.07);
-  background: #d7e8db;
-}
+@media (hover: hover) {
+  .add-control:hover:not(:disabled) .add-icon {
+    transform: scale(1.07);
+    background: #d7e8db;
+  }
 
-.add-control--urgent:hover:not(:disabled) .add-icon {
-  background: #f7d8cf;
+  .add-control--urgent:hover:not(:disabled) .add-icon {
+    background: #f7d8cf;
+  }
 }
 
 .add-control:disabled {
@@ -946,8 +1013,10 @@ input:focus-visible {
   cursor: pointer;
 }
 
-.retry-button:hover {
-  background: var(--urgent-soft);
+@media (hover: hover) {
+  .retry-button:hover {
+    background: var(--urgent-soft);
+  }
 }
 
 .task-enter-from.task-card--urgent,
@@ -994,7 +1063,11 @@ input:focus-visible {
   flex: 1;
   min-height: 0;
   display: flex;
-  padding: 18px;
+  padding:
+    calc(18px + env(safe-area-inset-top))
+    calc(18px + env(safe-area-inset-right))
+    calc(18px + env(safe-area-inset-bottom))
+    calc(18px + env(safe-area-inset-left));
   overflow: auto;
   background: rgba(31, 38, 30, 0.42);
   backdrop-filter: blur(4px);
@@ -1142,8 +1215,10 @@ input:focus-visible {
   background: var(--green);
 }
 
-.primary-button:hover:not(:disabled) {
-  background: var(--green-dark);
+@media (hover: hover) {
+  .primary-button:hover:not(:disabled) {
+    background: var(--green-dark);
+  }
 }
 
 .primary-button--urgent {
@@ -1151,8 +1226,10 @@ input:focus-visible {
   background: var(--urgent);
 }
 
-.primary-button--urgent:hover:not(:disabled) {
-  background: var(--urgent-dark);
+@media (hover: hover) {
+  .primary-button--urgent:hover:not(:disabled) {
+    background: var(--urgent-dark);
+  }
 }
 
 .primary-button:disabled {

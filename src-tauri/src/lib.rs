@@ -107,6 +107,11 @@ pub fn run() {
         show_main_window(app);
     }));
 
+    #[cfg(desktop)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+
     builder
         .setup(|app| {
             let app_data_dir = app.path().app_data_dir()?;

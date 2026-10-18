@@ -24,6 +24,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "licenseFile": "../LICENSE",
     "resources": {
       "../LICENSE": "LICENSE"
@@ -35,5 +36,16 @@
       "icons/queue/icon.icns",
       "icons/queue/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDYyRkIxODQyMkYyMUYzMTIKUldRUzh5RXZRaGo3WW1NdzUwcGlUejVYUzdGS3B6Z3ZkeXlLcFZkUVBOMm1UWmlMY2lTZnIyMEYK",
+      "endpoints": [
+        "https://github.com/VVMaestro/staq/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

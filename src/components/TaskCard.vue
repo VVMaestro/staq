@@ -130,15 +130,24 @@ defineEmits<{
   transition: background-color 150ms ease, transform 150ms ease;
 }
 
-.complete-button:hover {
-  transform: translateY(-1px);
-  background: #dfeee3;
+@media (hover: hover) {
+  .complete-button:hover {
+    transform: translateY(-1px);
+    background: #dfeee3;
+  }
 }
 
 .complete-button:disabled {
   cursor: wait;
   opacity: 0.55;
   transform: none;
+}
+
+@media (pointer: coarse) {
+  .complete-button {
+    min-height: 40px;
+    padding-inline: 14px;
+  }
 }
 
 @media (max-width: 520px) {
