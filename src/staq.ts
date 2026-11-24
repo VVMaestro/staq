@@ -25,6 +25,11 @@ export interface TaskPushData {
   description?: string;
 }
 
+export interface TaskUpdateData {
+  name: string;
+  description: string;
+}
+
 export interface CreateStaqData {
   name: string;
   description?: string;
@@ -57,6 +62,14 @@ export function pushOnStack(staqId: number, item: TaskPushData): Promise<StaqSna
 
 export function popCurrentTask(staqId: number): Promise<StaqSnapshot> {
   return invoke<StaqSnapshot>("staq_pop", { staqId });
+}
+
+export function updateTask(
+  staqId: number,
+  taskId: number,
+  item: TaskUpdateData,
+): Promise<StaqSnapshot> {
+  return invoke<StaqSnapshot>("staq_update_task", { staqId, taskId, item });
 }
 
 export function createStaq(data: CreateStaqData): Promise<StaqSnapshot> {

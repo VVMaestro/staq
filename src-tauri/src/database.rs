@@ -46,6 +46,13 @@ pub struct CreateTaskData {
     pub staq_id: Option<i64>,
 }
 
+pub struct UpdateTaskData {
+    pub id: i64,
+    pub staq_id: Option<i64>,
+    pub name: String,
+    pub description: String,
+}
+
 fn decode_task(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
     let created_at: String = row.try_get("created_at")?;
     let created_at = DateTime::parse_from_rfc3339(&created_at)
@@ -203,6 +210,22 @@ pub async fn complete_task(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error
     }
 
     Ok(())
+}
+
+pub async fn update_task(pool: &SqlitePool, data: &UpdateTaskData) -> Result<Task, sqlx::Error> {
+    let row = sqlx::query(
+        "UPDATE tasks SET name = ?1, description = ?2 \
+         WHERE id = ?3 AND status = 'active' AND staq_id IS ?4 \
+         RETURNING id, name, placement, description, status, staq_id, created_at",
+    )
+    .bind(&data.name)
+    .bind(&data.description)
+    .bind(data.id)
+    .bind(data.staq_id)
+    .fetch_one(pool)
+    .await?;
+
+    decode_task(&row)
 }
 
 pub async fn initialize(path: &Path) -> Result<SqlitePool, sqlx::Error> {

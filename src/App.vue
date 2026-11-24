@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, provide, ref, watch } from "vue";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import AppDialog from "./components/AppDialog.vue";
 import StaqSwitcher from "./components/StaqSwitcher.vue";
 import TaskCard from "./components/TaskCard.vue";
 import WindowChrome from "./components/WindowChrome.vue";
+import { MAX_TASK_DESCRIPTION_LENGTH } from "./taskDescription";
 import { useUpdater } from "./useUpdater";
 import { useWindowFrame, windowFrameKey } from "./useWindowFrame";
 import {
@@ -16,10 +18,15 @@ import {
   pushToQueue,
   staqLabel,
   staqTaskCount,
+  updateTask,
   type StaqSnapshot,
+  type Task,
 } from "./staq";
 
 type TaskPriority = "regular" | "urgent";
+type TaskDialogState =
+  | { kind: "create"; priority: TaskPriority }
+  | { kind: "edit"; taskId: number; priority: TaskPriority };
 
 const SELECTED_STAQ_KEY = "staq.selectedStaqId";
 
@@ -74,8 +81,9 @@ const {
   error: updateError,
 } = updater;
 
-const dialogMode = ref<TaskPriority>("regular");
-const taskTitle = ref("");
+const taskDialogState = ref<TaskDialogState>({ kind: "create", priority: "regular" });
+const taskName = ref("");
+const taskDescription = ref("");
 const staqName = ref("");
 const staqDescription = ref("");
 const staqToDeleteId = ref<number | null>(null);
@@ -105,7 +113,10 @@ const actionsDisabled = computed(
   () => isLoading.value || isBusy.value || !hasLoaded.value,
 );
 const canSubmit = computed(
-  () => taskTitle.value.trim().length > 0 && !isBusy.value,
+  () =>
+    taskName.value.trim().length > 0 &&
+    taskDescription.value.trim().length <= MAX_TASK_DESCRIPTION_LENGTH &&
+    !isBusy.value,
 );
 const canCreateStaq = computed(
   () => staqName.value.trim().length > 0 && !isBusy.value,
@@ -113,14 +124,31 @@ const canCreateStaq = computed(
 const staqToDelete = computed(
   () => staqs.value.find((item) => item.id === staqToDeleteId.value) ?? null,
 );
-const dialogTitle = computed(() =>
-  dialogMode.value === "urgent" ? "Добавить срочную задачу" : "Добавить задачу",
-);
-const dialogHint = computed(() =>
-  dialogMode.value === "urgent"
-    ? "Она окажется в самом верху и станет текущей."
-    : "Она встанет в конец очереди.",
-);
+const isEditDialog = computed(() => taskDialogState.value.kind === "edit");
+const isUrgentDialog = computed(() => taskDialogState.value.priority === "urgent");
+const taskDialogCopy = computed(() => {
+  if (isEditDialog.value) {
+    return {
+      kicker: isUrgentDialog.value ? "Срочная задача" : "Обычная задача",
+      title: "Редактировать задачу",
+      hint: "Изменения сохранятся без изменения позиции в списке.",
+      submitLabel: isBusy.value ? "Сохраняем…" : "Сохранить",
+    };
+  }
+  return isUrgentDialog.value
+    ? {
+        kicker: "Наверх стека",
+        title: "Добавить срочную задачу",
+        hint: "Она окажется в самом верху и станет текущей.",
+        submitLabel: isBusy.value ? "Добавляем…" : "Добавить",
+      }
+    : {
+        kicker: "В конец очереди",
+        title: "Добавить задачу",
+        hint: "Она встанет в конец очереди.",
+        submitLabel: isBusy.value ? "Добавляем…" : "Добавить",
+      };
+});
 
 watch(selectedStaqId, (id) => {
   try {
@@ -150,34 +178,76 @@ function selectStaq(id: number) {
   selectedStaqId.value = id;
 }
 
-function openDialog(mode: TaskPriority) {
+function openCreateTaskDialog(priority: TaskPriority) {
   if (actionsDisabled.value) return;
 
   commandError.value = null;
-  dialogMode.value = mode;
-  taskTitle.value = "";
+  taskDialogState.value = { kind: "create", priority };
+  taskName.value = "";
+  taskDescription.value = "";
   void taskDialogRef.value?.open();
 }
 
-async function addTask() {
-  const title = taskTitle.value.trim();
-  if (!title || isBusy.value) return;
+function openEditTaskDialog(task: Task, priority: TaskPriority) {
+  if (actionsDisabled.value) return;
+
+  commandError.value = null;
+  taskDialogState.value = { kind: "edit", taskId: task.id, priority };
+  taskName.value = task.name;
+  taskDescription.value = task.description;
+  void taskDialogRef.value?.open();
+}
+
+function handleDescriptionKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+    event.preventDefault();
+    void submitTaskDialog();
+  }
+}
+
+async function submitTaskDialog() {
+  const name = taskName.value.trim();
+  const description = taskDescription.value.trim();
+  if (!name || description.length > MAX_TASK_DESCRIPTION_LENGTH || isBusy.value) return;
 
   isBusy.value = true;
   commandError.value = null;
 
+  const dialog = taskDialogState.value;
+
   try {
     const staqId = selectedStaqId.value;
-    replaceStaq(
-      dialogMode.value === "urgent"
-        ? await pushOnStack(staqId, { name: title })
-        : await pushToQueue(staqId, { name: title }),
-    );
+    if (dialog.kind === "edit") {
+      replaceStaq(await updateTask(staqId, dialog.taskId, { name, description }));
+    } else {
+      const payload = description ? { name, description } : { name };
+      replaceStaq(
+        dialog.priority === "urgent"
+          ? await pushOnStack(staqId, payload)
+          : await pushToQueue(staqId, payload),
+      );
+    }
     taskDialogRef.value?.close();
   } catch (error) {
-    reportCommandError("Не удалось добавить задачу. Попробуйте ещё раз.", error);
+    reportCommandError(
+      dialog.kind === "edit"
+        ? "Не удалось сохранить изменения задачи. Попробуйте ещё раз."
+        : "Не удалось добавить задачу. Попробуйте ещё раз.",
+      error,
+    );
   } finally {
     isBusy.value = false;
+  }
+}
+
+async function handleOpenTaskLink(href: string) {
+  if (!/^https?:\/\//i.test(href)) return;
+
+  commandError.value = null;
+  try {
+    await openUrl(href);
+  } catch (error) {
+    reportCommandError("Не удалось открыть ссылку во внешнем браузере.", error);
   }
 }
 
@@ -319,7 +389,7 @@ onMounted(async () => {
           type="button"
           aria-label="Добавить срочную задачу в начало очереди"
           :disabled="actionsDisabled"
-          @click="openDialog('urgent')"
+          @click="openCreateTaskDialog('urgent')"
         >
           <span class="add-icon" aria-hidden="true"></span>
           <span>
@@ -366,11 +436,14 @@ onMounted(async () => {
               <TaskCard
                 v-for="task in group.tasks"
                 :key="task.id"
-                :title="task.name"
+                :name="task.name"
+                :description="task.description"
                 :urgent="group.priority === 'urgent'"
                 :current="task.id === currentTaskId"
                 :busy="isBusy"
                 @complete="completeCurrentTask"
+                @edit="openEditTaskDialog(task, group.priority)"
+                @open-link="handleOpenTaskLink"
               />
             </TransitionGroup>
           </div>
@@ -387,7 +460,7 @@ onMounted(async () => {
           type="button"
           aria-label="Добавить обычную задачу в конец очереди"
           :disabled="actionsDisabled"
-          @click="openDialog('regular')"
+          @click="openCreateTaskDialog('regular')"
         >
           <span class="add-icon" aria-hidden="true"></span>
           <span>
@@ -404,37 +477,62 @@ onMounted(async () => {
       :busy="isBusy"
       labelledby="dialog-title"
       describedby="dialog-description"
-      @close="taskTitle = ''"
+      @close="taskName = ''; taskDescription = ''"
     >
-      <form class="dialog-card" @submit.prevent="addTask">
+      <form class="dialog-card" @submit.prevent="submitTaskDialog">
         <div class="dialog-heading">
           <span
             class="dialog-mode-icon"
-            :class="{ 'dialog-mode-icon--urgent': dialogMode === 'urgent' }"
+            :class="{
+              'dialog-mode-icon--urgent': isUrgentDialog,
+              'dialog-mode-icon--edit': isEditDialog,
+            }"
             aria-hidden="true"
-          ></span>
+          >
+            <svg v-if="isEditDialog" viewBox="0 0 16 16" focusable="false">
+              <path
+                d="M11.6 2.4a1.5 1.5 0 0 1 2.1 2.1L6.1 12.1l-3 .9.9-3 7.6-7.6Z"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+          </span>
           <div>
-            <p class="dialog-kicker">
-              {{ dialogMode === "urgent" ? "Наверх стека" : "В конец очереди" }}
-            </p>
-            <h2 id="dialog-title">{{ dialogTitle }}</h2>
+            <p class="dialog-kicker">{{ taskDialogCopy.kicker }}</p>
+            <h2 id="dialog-title">{{ taskDialogCopy.title }}</h2>
           </div>
         </div>
 
-        <p id="dialog-description" class="dialog-description">{{ dialogHint }}</p>
+        <p id="dialog-description" class="dialog-description">{{ taskDialogCopy.hint }}</p>
 
         <p v-if="commandError" class="dialog-error" role="alert">{{ commandError }}</p>
 
-        <label for="task-title">Коротко опишите задачу</label>
+        <label for="task-name">Название</label>
         <input
-          id="task-title"
-          v-model="taskTitle"
+          id="task-name"
+          v-model="taskName"
           data-autofocus
           type="text"
           maxlength="160"
           autocomplete="off"
           placeholder="Например, ответить на письмо"
         />
+
+        <div class="dialog-field-header">
+          <label class="dialog-field-label" for="task-description">Описание (необязательно)</label>
+          <span class="field-counter">{{ taskDescription.length }}/{{ MAX_TASK_DESCRIPTION_LENGTH }}</span>
+        </div>
+        <textarea
+          id="task-description"
+          v-model="taskDescription"
+          rows="4"
+          :maxlength="MAX_TASK_DESCRIPTION_LENGTH"
+          placeholder="Подробности, шаги или ссылки"
+          @keydown="handleDescriptionKeydown"
+        ></textarea>
 
         <div class="dialog-actions">
           <button
@@ -447,11 +545,11 @@ onMounted(async () => {
           </button>
           <button
             class="primary-button"
-            :class="{ 'primary-button--urgent': dialogMode === 'urgent' }"
+            :class="{ 'primary-button--urgent': isUrgentDialog }"
             type="submit"
             :disabled="!canSubmit"
           >
-            {{ isBusy ? "Добавляем…" : "Добавить" }}
+            {{ taskDialogCopy.submitLabel }}
           </button>
         </div>
       </form>
@@ -652,7 +750,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -661,7 +760,8 @@ button {
 }
 
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+textarea:focus-visible {
   outline: 3px solid rgba(47, 107, 78, 0.28);
   outline-offset: 2px;
 }
@@ -1127,6 +1227,16 @@ input:focus-visible {
   background: var(--urgent-soft);
 }
 
+.dialog-mode-icon--edit::before,
+.dialog-mode-icon--edit::after {
+  content: none;
+}
+
+.dialog-mode-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
 .dialog-mode-icon--danger {
   color: var(--urgent);
   background: var(--urgent-soft);
@@ -1163,7 +1273,28 @@ input:focus-visible {
   margin-top: 14px;
 }
 
-.dialog-card input {
+.dialog-field-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 14px;
+  margin-bottom: 7px;
+}
+
+.dialog-field-header .dialog-field-label {
+  margin: 0;
+}
+
+.field-counter {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.dialog-card input,
+.dialog-card textarea {
   width: 100%;
   padding: 11px 12px;
   border: 1px solid #cfd6cc;
@@ -1174,11 +1305,21 @@ input:focus-visible {
   transition: border-color 150ms ease, box-shadow 150ms ease;
 }
 
-.dialog-card input::placeholder {
+.dialog-card textarea {
+  display: block;
+  min-height: 92px;
+  max-height: 220px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.dialog-card input::placeholder,
+.dialog-card textarea::placeholder {
   color: #9ca39a;
 }
 
-.dialog-card input:focus {
+.dialog-card input:focus,
+.dialog-card textarea:focus {
   border-color: #7ca089;
   box-shadow: 0 0 0 3px rgba(47, 107, 78, 0.1);
 }

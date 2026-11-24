@@ -69,7 +69,7 @@ function handleCancel(event: Event) {
 function handleKeydown(event: KeyboardEvent) {
   if (event.key !== "Tab") return;
   const controls = dialogRef.value?.querySelectorAll<HTMLElement>(
-    "button:not(:disabled), input:not(:disabled)",
+    "button:not(:disabled), input:not(:disabled), textarea:not(:disabled)",
   );
   if (!controls?.length) return;
   const first = controls[0];
