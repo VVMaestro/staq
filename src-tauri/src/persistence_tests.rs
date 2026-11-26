@@ -1414,3 +1414,234 @@ fn failed_update_task_preserves_memory_and_database() {
         state.pool.close().await;
     });
 }
+
+async fn assert_task_status_and_closed_at(
+    pool: &SqlitePool,
+    task_id: i64,
+    expected_status: &str,
+) {
+    let (status, closed_at): (String, Option<String>) =
+        sqlx::query_as("SELECT status, closed_at FROM tasks WHERE id = ?1")
+            .bind(task_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    assert_eq!(status, expected_status);
+    let closed_at = closed_at.expect("completed or cancelled task must record closed_at");
+    chrono::DateTime::parse_from_rfc3339(&closed_at)
+        .expect("closed_at must use RFC 3339 format");
+}
+
+#[test]
+fn cancel_task_cancels_current_and_waiting_tasks_in_stack_and_queue_and_survives_reopening() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("staq.sqlite3");
+        let pool = database::initialize(&path).await.unwrap();
+        insert_staq(&pool, 1, "Work").await;
+        insert_staq(&pool, 2, "Personal").await;
+        insert_task(&pool, "Personal task", "queue", 1, Some(2)).await;
+
+        let state = AppState::load(pool).await.unwrap();
+        let personal_before = staq(&state, 2).await.serialize();
+
+        for staq_id in [None, Some(1)] {
+            for name in ["Q1", "Q2", "Q3"] {
+                state.push(&task_data(name), Queue, staq_id).await.unwrap();
+            }
+            for name in ["S1", "S2", "S3"] {
+                state.push(&task_data(name), Stack, staq_id).await.unwrap();
+            }
+        }
+
+        let mut cancelled_ids = Vec::new();
+        let mut completed_ids = Vec::new();
+
+        for (query_id, numeric_id) in [(None, 0), (Some(1), 1)] {
+            let initial = staq(&state, numeric_id).await;
+            let current_stack_id = initial.stack[2].id; // S3 (current)
+            let waiting_stack_id = initial.stack[0].id; // S1 (waiting)
+            let waiting_queue_id = initial.queue[1].id; // Q2 (waiting)
+
+            // Cancel current task -> S2 becomes current.
+            let after_current = state.cancel_task(query_id, current_stack_id).await.unwrap();
+            assert_eq!(after_current.peek().unwrap().name, "S2");
+            cancelled_ids.push(current_stack_id);
+
+            // Cancel waiting task in stack.
+            let after_stack = state.cancel_task(query_id, waiting_stack_id).await.unwrap();
+            assert_eq!(
+                after_stack.stack.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+                ["S2"]
+            );
+            cancelled_ids.push(waiting_stack_id);
+
+            // Cancel waiting task in queue.
+            let after_queue = state.cancel_task(query_id, waiting_queue_id).await.unwrap();
+            assert_eq!(completion_order(after_queue), ["S2", "Q1", "Q3"]);
+            cancelled_ids.push(waiting_queue_id);
+
+            // Complete current task (S2) and verify closed_at is also set on completion.
+            let s2_id = staq(&state, numeric_id).await.peek().unwrap().id;
+            let after_complete = state.pop(query_id).await.unwrap();
+            assert_eq!(completion_order(after_complete), ["Q1", "Q3"]);
+            completed_ids.push(s2_id);
+        }
+
+        // Also check explicit Some(0) targets default staq.
+        let default_q3_id = staq(&state, 0).await.queue[1].id;
+        let after_explicit_zero = state.cancel_task(Some(0), default_q3_id).await.unwrap();
+        assert_eq!(completion_order(after_explicit_zero), ["Q1"]);
+        cancelled_ids.push(default_q3_id);
+
+        assert_eq!(staq(&state, 2).await.serialize(), personal_before);
+
+        for id in &cancelled_ids {
+            assert_task_status_and_closed_at(&state.pool, *id, "cancelled").await;
+        }
+
+        for id in &completed_ids {
+            assert_task_status_and_closed_at(&state.pool, *id, "completed").await;
+        }
+
+        // Active tasks keep closed_at = NULL.
+        let remaining_default = staq(&state, 0).await;
+        assert_eq!(remaining_default.queue[0].closed_at, None);
+
+        let expected = snapshot(&state).await;
+        assert_eq!(persisted_snapshot(&state.pool).await, expected);
+        state.pool.close().await;
+        drop(state);
+
+        let reopened = AppState::load(database::initialize(&path).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(snapshot(&reopened).await, expected);
+        reopened.pool.close().await;
+    });
+}
+
+#[test]
+fn cancel_task_rejects_missing_targets_cross_staq_completed_and_cancelled_tasks_without_changes() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = database::initialize(&directory.path().join("staq.sqlite3"))
+            .await
+            .unwrap();
+        insert_staq(&pool, 1, "Work").await;
+        let state = AppState::load(pool).await.unwrap();
+
+        let default_task_id = state
+            .push(&task_data("Default task"), Queue, None)
+            .await
+            .unwrap()
+            .queue[0]
+            .id;
+        let work_task_id = state
+            .push(&task_data("Work task"), Queue, Some(1))
+            .await
+            .unwrap()
+            .queue[0]
+            .id;
+        let completed_task_id = state
+            .push(&task_data("Completed task"), Stack, Some(1))
+            .await
+            .unwrap()
+            .peek()
+            .unwrap()
+            .id;
+        state.pop(Some(1)).await.unwrap();
+
+        let cancelled_task_id = state
+            .push(&task_data("Cancelled task"), Stack, Some(1))
+            .await
+            .unwrap()
+            .peek()
+            .unwrap()
+            .id;
+        state.cancel_task(Some(1), cancelled_task_id).await.unwrap();
+
+        let before = snapshot(&state).await;
+
+        assert!(matches!(
+            state.cancel_task(Some(999), work_task_id).await,
+            Err(AppStateError::StaqNotFound(999))
+        ));
+        assert!(matches!(
+            state.cancel_task(Some(1), 9999).await,
+            Err(AppStateError::TaskNotFound(9999))
+        ));
+        assert!(matches!(
+            state.cancel_task(None, work_task_id).await,
+            Err(AppStateError::TaskNotFound(id)) if id == work_task_id
+        ));
+        assert!(matches!(
+            state.cancel_task(Some(1), default_task_id).await,
+            Err(AppStateError::TaskNotFound(id)) if id == default_task_id
+        ));
+        assert!(matches!(
+            state.cancel_task(Some(1), completed_task_id).await,
+            Err(AppStateError::TaskNotFound(id)) if id == completed_task_id
+        ));
+        assert!(matches!(
+            state.cancel_task(Some(1), cancelled_task_id).await,
+            Err(AppStateError::TaskNotFound(id)) if id == cancelled_task_id
+        ));
+
+        assert_eq!(snapshot(&state).await, before);
+        assert_eq!(persisted_snapshot(&state.pool).await, before);
+
+        // Task already completed directly in SQLite while still present in memory.
+        sqlx::query("UPDATE tasks SET status = 'completed' WHERE id = ?1")
+            .bind(work_task_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let memory_before_drift = snapshot(&state).await;
+        assert!(matches!(
+            state.cancel_task(Some(1), work_task_id).await,
+            Err(AppStateError::TaskNotFound(id)) if id == work_task_id
+        ));
+        assert_eq!(snapshot(&state).await, memory_before_drift);
+        let db_status: String = sqlx::query_scalar("SELECT status FROM tasks WHERE id = ?1")
+            .bind(work_task_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(db_status, "completed");
+
+        state.pool.close().await;
+    });
+}
+
+#[test]
+fn failed_cancel_task_preserves_memory_and_database() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = database::initialize(&directory.path().join("staq.sqlite3"))
+            .await
+            .unwrap();
+        insert_staq(&pool, 1, "Work").await;
+        let state = AppState::load(pool).await.unwrap();
+        let task_id = state
+            .push(&task_data("Original"), Queue, Some(1))
+            .await
+            .unwrap()
+            .queue[0]
+            .id;
+        let expected = snapshot(&state).await;
+
+        sqlx::query("CREATE TRIGGER reject_task_cancel BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            state.cancel_task(Some(1), task_id).await,
+            Err(AppStateError::Database(sqlx::Error::Database(_)))
+        ));
+        assert_eq!(snapshot(&state).await, expected);
+        assert_eq!(persisted_snapshot(&state.pool).await, expected);
+        state.pool.close().await;
+    });
+}
