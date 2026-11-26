@@ -101,6 +101,24 @@ impl Staq {
         }
     }
 
+    pub fn find_task(&self, id: i64) -> Option<&Task> {
+        self.stack
+            .iter()
+            .chain(self.queue.iter())
+            .find(|task| task.id == id)
+    }
+
+    pub fn update_task(&mut self, id: i64, name: String, description: String) -> Option<&Task> {
+        let task = self
+            .stack
+            .iter_mut()
+            .chain(self.queue.iter_mut())
+            .find(|task| task.id == id)?;
+        task.name = name;
+        task.description = description;
+        Some(&*task)
+    }
+
     pub fn serialize(&self) -> String {
         serde_json::to_string(self).unwrap()
     }

@@ -1,6 +1,6 @@
 use database::{CreateStaqData, Placement};
 use staq::{Staq, Task};
-use state::{AppState, TaskPushData};
+use state::{AppState, TaskPushData, TaskUpdateData};
 use tauri::Manager;
 
 mod database;
@@ -62,6 +62,19 @@ async fn staq_push_on_stack(
 #[tauri::command]
 async fn staq_pop(state: tauri::State<'_, AppState>, staq_id: Option<i64>) -> Result<Staq, String> {
     state.pop(staq_id).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn staq_update_task(
+    state: tauri::State<'_, AppState>,
+    staq_id: Option<i64>,
+    task_id: i64,
+    item: TaskUpdateData,
+) -> Result<Staq, String> {
+    state
+        .update_task(staq_id, task_id, &item)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -156,6 +169,7 @@ pub fn run() {
             staq_push_to_queue,
             staq_push_on_stack,
             staq_pop,
+            staq_update_task,
             staq_peek,
             staq_create,
             staq_delete,

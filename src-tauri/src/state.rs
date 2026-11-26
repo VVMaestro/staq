@@ -1,4 +1,4 @@
-use crate::database::{self, CreateStaqData, CreateTaskData, Placement};
+use crate::database::{self, CreateStaqData, CreateTaskData, Placement, UpdateTaskData};
 use crate::staq::Staq;
 use serde::Deserialize;
 use sqlx::SqlitePool;
@@ -6,12 +6,17 @@ use std::fmt::Display;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, RwLock};
 
+pub const MAX_TASK_DESCRIPTION_LEN: usize = 2000;
+
 #[derive(Debug)]
 pub enum AppStateError {
     Database(sqlx::Error),
     StaqNotFound(i64),
+    TaskNotFound(i64),
     DefaultStaqDeletion,
     EmptyStaqName,
+    EmptyTaskName,
+    TaskDescriptionTooLong(usize),
 }
 
 impl Display for AppStateError {
@@ -21,14 +26,54 @@ impl Display for AppStateError {
             Self::StaqNotFound(id) => {
                 write!(f, "Staq with id {id} not found in memory")
             }
+            Self::TaskNotFound(id) => {
+                write!(f, "Task with id {id} not found")
+            }
             Self::DefaultStaqDeletion => {
                 write!(f, "Cannot delete default staq")
             }
             Self::EmptyStaqName => {
                 write!(f, "Staq name must not be empty")
             }
+            Self::EmptyTaskName => {
+                write!(f, "Task name must not be empty")
+            }
+            Self::TaskDescriptionTooLong(limit) => {
+                write!(f, "Task description must not exceed {limit} characters")
+            }
         }
     }
+}
+
+struct NormalizedTaskFields {
+    name: String,
+    description: String,
+}
+
+fn normalize_task_fields(
+    name: &str,
+    description: Option<&str>,
+) -> Result<NormalizedTaskFields, AppStateError> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(AppStateError::EmptyTaskName);
+    }
+
+    let description = description.unwrap_or("").trim();
+    if description.chars().count() > MAX_TASK_DESCRIPTION_LEN {
+        return Err(AppStateError::TaskDescriptionTooLong(
+            MAX_TASK_DESCRIPTION_LEN,
+        ));
+    }
+
+    Ok(NormalizedTaskFields {
+        name: name.to_owned(),
+        description: description.to_owned(),
+    })
+}
+
+fn db_staq_id(staq_id: i64) -> Option<i64> {
+    (staq_id != database::DEFAULT_STAQ_ID).then_some(staq_id)
 }
 
 impl From<sqlx::Error> for AppStateError {
@@ -39,6 +84,12 @@ impl From<sqlx::Error> for AppStateError {
 
 #[derive(Deserialize)]
 pub struct TaskPushData {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct TaskUpdateData {
     pub name: String,
     pub description: Option<String>,
 }
@@ -89,13 +140,15 @@ impl AppState {
         placement: Placement,
         staq_id: Option<i64>,
     ) -> Result<Staq, AppStateError> {
+        let fields = normalize_task_fields(&task.name, task.description.as_deref())?;
+
         let staq = self.staq(staq_id).await?;
         let mut staq = staq.lock().await;
 
         let task_data = CreateTaskData {
-            name: task.name.clone(),
-            description: task.description.clone(),
-            staq_id: (staq.id != database::DEFAULT_STAQ_ID).then_some(staq.id),
+            name: fields.name,
+            description: Some(fields.description),
+            staq_id: db_staq_id(staq.id),
             placement,
         };
 
@@ -121,6 +174,39 @@ impl AppState {
                 Err(error) => return Err(error.into()),
             }
         }
+
+        Ok(staq.clone())
+    }
+
+    pub async fn update_task(
+        &self,
+        staq_id: Option<i64>,
+        task_id: i64,
+        data: &TaskUpdateData,
+    ) -> Result<Staq, AppStateError> {
+        let fields = normalize_task_fields(&data.name, data.description.as_deref())?;
+
+        let staq = self.staq(staq_id).await?;
+        let mut staq = staq.lock().await;
+
+        if staq.find_task(task_id).is_none() {
+            return Err(AppStateError::TaskNotFound(task_id));
+        }
+
+        let update_data = UpdateTaskData {
+            id: task_id,
+            staq_id: db_staq_id(staq.id),
+            name: fields.name,
+            description: fields.description,
+        };
+
+        let updated = match database::update_task(&self.pool, &update_data).await {
+            Ok(task) => task,
+            Err(sqlx::Error::RowNotFound) => return Err(AppStateError::TaskNotFound(task_id)),
+            Err(error) => return Err(error.into()),
+        };
+
+        staq.update_task(task_id, updated.name, updated.description);
 
         Ok(staq.clone())
     }

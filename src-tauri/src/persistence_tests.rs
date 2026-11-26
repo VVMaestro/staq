@@ -1,6 +1,6 @@
 use super::{database, AppState};
 use crate::staq::Staq;
-use crate::state::{AppStateError, TaskPushData};
+use crate::state::{AppStateError, TaskPushData, TaskUpdateData};
 use database::Placement::{Queue, Stack};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
@@ -933,6 +933,484 @@ fn list_staqs_returns_all_staqs_sorted_by_id() {
             .collect();
         assert_eq!(listed, snapshot(&state).await);
         assert_eq!(listed, persisted_snapshot(&state.pool).await);
+        state.pool.close().await;
+    });
+}
+
+#[test]
+fn push_normalizes_multiline_and_blank_descriptions_and_survives_reopening() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("staq.sqlite3");
+        let pool = database::initialize(&path).await.unwrap();
+        let state = AppState::load(pool).await.unwrap();
+
+        let multiline = TaskPushData {
+            name: "  Сделать релиз  ".into(),
+            description: Some("\n  Строка 1\n\n  Строка 2  \n\t ".into()),
+        };
+        let blank_desc = TaskPushData {
+            name: "Быстрая задача".into(),
+            description: Some("   \n\t  ".into()),
+        };
+        let max_desc = "а".repeat(2000);
+        let at_limit = TaskPushData {
+            name: "На границе лимита".into(),
+            description: Some(format!("  {max_desc}  ")),
+        };
+
+        state.push(&multiline, Queue, None).await.unwrap();
+        state.push(&blank_desc, Queue, None).await.unwrap();
+        let updated = state.push(&at_limit, Stack, None).await.unwrap();
+
+        assert_eq!(updated.queue[0].name, "Сделать релиз");
+        assert_eq!(updated.queue[0].description, "Строка 1\n\n  Строка 2");
+        assert_eq!(updated.queue[1].name, "Быстрая задача");
+        assert_eq!(updated.queue[1].description, "");
+        assert_eq!(updated.stack[0].name, "На границе лимита");
+        assert_eq!(updated.stack[0].description, max_desc);
+
+        let expected = snapshot(&state).await;
+        assert_eq!(persisted_snapshot(&state.pool).await, expected);
+        state.pool.close().await;
+        drop(state);
+
+        let reopened = AppState::load(database::initialize(&path).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(snapshot(&reopened).await, expected);
+        reopened.pool.close().await;
+    });
+}
+
+#[test]
+fn push_rejects_empty_name_and_too_long_description_without_changes() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = database::initialize(&directory.path().join("staq.sqlite3"))
+            .await
+            .unwrap();
+        let state = AppState::load(pool).await.unwrap();
+        let before = snapshot(&state).await;
+
+        for name in ["", "   ", "\n\t"] {
+            assert!(matches!(
+                state
+                    .push(
+                        &TaskPushData {
+                            name: name.into(),
+                            description: Some("Обычное описание".into()),
+                        },
+                        Queue,
+                        None,
+                    )
+                    .await,
+                Err(AppStateError::EmptyTaskName)
+            ));
+        }
+
+        let too_long = "я".repeat(2001);
+        for placement in [Queue, Stack] {
+            assert!(matches!(
+                state
+                    .push(
+                        &TaskPushData {
+                            name: "Слишком длинное описание".into(),
+                            description: Some(too_long.clone()),
+                        },
+                        placement,
+                        None,
+                    )
+                    .await,
+                Err(AppStateError::TaskDescriptionTooLong(2000))
+            ));
+        }
+
+        assert_eq!(snapshot(&state).await, before);
+        assert_eq!(persisted_snapshot(&state.pool).await, before);
+        state.pool.close().await;
+    });
+}
+
+#[test]
+fn update_task_updates_queue_and_stack_tasks_preserving_order_and_metadata() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("staq.sqlite3");
+        let pool = database::initialize(&path).await.unwrap();
+        insert_staq(&pool, 1, "Work").await;
+        insert_staq(&pool, 2, "Personal").await;
+        insert_task(&pool, "Personal task", "queue", 1, Some(2)).await;
+
+        let state = AppState::load(pool).await.unwrap();
+        let personal_before = staq(&state, 2).await.serialize();
+
+        // Populate default staq (None) and custom staq (Some(1)) with queue & stack tasks.
+        for staq_id in [None, Some(1)] {
+            state
+                .push(
+                    &TaskPushData {
+                        name: "Queue 1".into(),
+                        description: None,
+                    },
+                    Queue,
+                    staq_id,
+                )
+                .await
+                .unwrap();
+            state
+                .push(
+                    &TaskPushData {
+                        name: "Queue 2".into(),
+                        description: Some("Old queue desc".into()),
+                    },
+                    Queue,
+                    staq_id,
+                )
+                .await
+                .unwrap();
+            state
+                .push(
+                    &TaskPushData {
+                        name: "Stack 1".into(),
+                        description: Some("Old stack desc".into()),
+                    },
+                    Stack,
+                    staq_id,
+                )
+                .await
+                .unwrap();
+            state
+                .push(
+                    &TaskPushData {
+                        name: "Stack 2".into(),
+                        description: Some("Keep me".into()),
+                    },
+                    Stack,
+                    staq_id,
+                )
+                .await
+                .unwrap();
+        }
+
+        for (query_id, numeric_id) in [(None, 0), (Some(1), 1)] {
+            let before_staq = staq(&state, numeric_id).await;
+            let q1_before = before_staq.queue[0].clone();
+            let s1_before = before_staq.stack[0].clone();
+            let q1_pos_before: i64 =
+                sqlx::query_scalar("SELECT position FROM tasks WHERE id = ?1")
+                    .bind(q1_before.id)
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap();
+            let s1_pos_before: i64 =
+                sqlx::query_scalar("SELECT position FROM tasks WHERE id = ?1")
+                    .bind(s1_before.id)
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap();
+
+            // Add multiline description to queue task that had none.
+            let after_q1 = state
+                .update_task(
+                    query_id,
+                    q1_before.id,
+                    &TaskUpdateData {
+                        name: "  Queue 1 updated  ".into(),
+                        description: Some("\n  Детали\n  https://example.com  \n".into()),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(after_q1.queue[0].id, q1_before.id);
+            assert_eq!(after_q1.queue[0].name, "Queue 1 updated");
+            assert_eq!(
+                after_q1.queue[0].description,
+                "Детали\n  https://example.com"
+            );
+            assert_eq!(after_q1.queue[0].placement, q1_before.placement);
+            assert_eq!(after_q1.queue[0].status, q1_before.status);
+            assert_eq!(after_q1.queue[0].staq_id, q1_before.staq_id);
+            assert_eq!(after_q1.queue[0].created_at, q1_before.created_at);
+
+            // Clear description of stack task using whitespace-only value.
+            let after_s1 = state
+                .update_task(
+                    query_id,
+                    s1_before.id,
+                    &TaskUpdateData {
+                        name: "Stack 1 cleared".into(),
+                        description: Some("   \n\t ".into()),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(after_s1.stack[0].id, s1_before.id);
+            assert_eq!(after_s1.stack[0].name, "Stack 1 cleared");
+            assert_eq!(after_s1.stack[0].description, "");
+            assert_eq!(after_s1.stack[0].placement, s1_before.placement);
+            assert_eq!(after_s1.stack[0].status, s1_before.status);
+            assert_eq!(after_s1.stack[0].staq_id, s1_before.staq_id);
+            assert_eq!(after_s1.stack[0].created_at, s1_before.created_at);
+
+            assert_eq!(
+                completion_order(after_s1),
+                ["Stack 2", "Stack 1 cleared", "Queue 1 updated", "Queue 2"]
+            );
+
+            let q1_pos_after: i64 =
+                sqlx::query_scalar("SELECT position FROM tasks WHERE id = ?1")
+                    .bind(q1_before.id)
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap();
+            let s1_pos_after: i64 =
+                sqlx::query_scalar("SELECT position FROM tasks WHERE id = ?1")
+                    .bind(s1_before.id)
+                    .fetch_one(&state.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(q1_pos_after, q1_pos_before);
+            assert_eq!(s1_pos_after, s1_pos_before);
+        }
+
+        // Also check explicit Some(0) targets default staq.
+        let default_q2_id = staq(&state, 0).await.queue[1].id;
+        let updated_default = state
+            .update_task(
+                Some(0),
+                default_q2_id,
+                &TaskUpdateData {
+                    name: "Queue 2 via explicit 0".into(),
+                    description: None,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated_default.queue[1].name, "Queue 2 via explicit 0");
+        assert_eq!(updated_default.queue[1].description, "");
+
+        assert_eq!(staq(&state, 2).await.serialize(), personal_before);
+        let expected = snapshot(&state).await;
+        assert_eq!(persisted_snapshot(&state.pool).await, expected);
+        state.pool.close().await;
+        drop(state);
+
+        let reopened = AppState::load(database::initialize(&path).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(snapshot(&reopened).await, expected);
+        reopened.pool.close().await;
+    });
+}
+
+#[test]
+fn update_task_rejects_invalid_inputs_missing_targets_and_completed_tasks_without_changes() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = database::initialize(&directory.path().join("staq.sqlite3"))
+            .await
+            .unwrap();
+        insert_staq(&pool, 1, "Work").await;
+        let state = AppState::load(pool).await.unwrap();
+
+        let default_staq = state
+            .push(&task_data("Default task"), Queue, None)
+            .await
+            .unwrap();
+        let default_task_id = default_staq.queue[0].id;
+
+        let work_staq = state
+            .push(&task_data("Work task"), Queue, Some(1))
+            .await
+            .unwrap();
+        let work_task_id = work_staq.queue[0].id;
+
+        let to_complete = state
+            .push(&task_data("Completed task"), Stack, Some(1))
+            .await
+            .unwrap();
+        let completed_task_id = to_complete.peek().unwrap().id;
+        state.pop(Some(1)).await.unwrap();
+
+        let before = snapshot(&state).await;
+
+        // Empty or blank name.
+        for name in ["", "   ", "\t\n"] {
+            assert!(matches!(
+                state
+                    .update_task(
+                        Some(1),
+                        work_task_id,
+                        &TaskUpdateData {
+                            name: name.into(),
+                            description: Some("Updated".into()),
+                        },
+                    )
+                    .await,
+                Err(AppStateError::EmptyTaskName)
+            ));
+        }
+
+        // Description exceeding 2000 characters.
+        assert!(matches!(
+            state
+                .update_task(
+                    Some(1),
+                    work_task_id,
+                    &TaskUpdateData {
+                        name: "Valid name".into(),
+                        description: Some("б".repeat(2001)),
+                    },
+                )
+                .await,
+            Err(AppStateError::TaskDescriptionTooLong(2000))
+        ));
+
+        // Missing staq.
+        assert!(matches!(
+            state
+                .update_task(
+                    Some(999),
+                    work_task_id,
+                    &TaskUpdateData {
+                        name: "Valid name".into(),
+                        description: None,
+                    },
+                )
+                .await,
+            Err(AppStateError::StaqNotFound(999))
+        ));
+
+        // Missing task id.
+        assert!(matches!(
+            state
+                .update_task(
+                    Some(1),
+                    9999,
+                    &TaskUpdateData {
+                        name: "Valid name".into(),
+                        description: None,
+                    },
+                )
+                .await,
+            Err(AppStateError::TaskNotFound(9999))
+        ));
+
+        // Task belongs to a different staq.
+        assert!(matches!(
+            state
+                .update_task(
+                    None,
+                    work_task_id,
+                    &TaskUpdateData {
+                        name: "Cross-staq edit".into(),
+                        description: None,
+                    },
+                )
+                .await,
+            Err(AppStateError::TaskNotFound(id)) if id == work_task_id
+        ));
+        assert!(matches!(
+            state
+                .update_task(
+                    Some(1),
+                    default_task_id,
+                    &TaskUpdateData {
+                        name: "Cross-staq edit".into(),
+                        description: None,
+                    },
+                )
+                .await,
+            Err(AppStateError::TaskNotFound(id)) if id == default_task_id
+        ));
+
+        // Completed task (popped out of memory).
+        assert!(matches!(
+            state
+                .update_task(
+                    Some(1),
+                    completed_task_id,
+                    &TaskUpdateData {
+                        name: "Edit completed".into(),
+                        description: Some("Should fail".into()),
+                    },
+                )
+                .await,
+            Err(AppStateError::TaskNotFound(id)) if id == completed_task_id
+        ));
+
+        assert_eq!(snapshot(&state).await, before);
+        assert_eq!(persisted_snapshot(&state.pool).await, before);
+
+        // Task completed directly in SQLite while still present in memory.
+        sqlx::query("UPDATE tasks SET status = 'completed' WHERE id = ?1")
+            .bind(work_task_id)
+            .execute(&state.pool)
+            .await
+            .unwrap();
+        let memory_before_drift = snapshot(&state).await;
+        assert!(matches!(
+            state
+                .update_task(
+                    Some(1),
+                    work_task_id,
+                    &TaskUpdateData {
+                        name: "Edit DB-completed".into(),
+                        description: Some("Should fail".into()),
+                    },
+                )
+                .await,
+            Err(AppStateError::TaskNotFound(id)) if id == work_task_id
+        ));
+        assert_eq!(snapshot(&state).await, memory_before_drift);
+        let db_name: String = sqlx::query_scalar("SELECT name FROM tasks WHERE id = ?1")
+            .bind(work_task_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(db_name, "Work task");
+
+        state.pool.close().await;
+    });
+}
+
+#[test]
+fn failed_update_task_preserves_memory_and_database() {
+    tauri::async_runtime::block_on(async {
+        let directory = tempfile::tempdir().unwrap();
+        let pool = database::initialize(&directory.path().join("staq.sqlite3"))
+            .await
+            .unwrap();
+        insert_staq(&pool, 1, "Work").await;
+        let state = AppState::load(pool).await.unwrap();
+        let staq_after_push = state
+            .push(&task_data("Original"), Queue, Some(1))
+            .await
+            .unwrap();
+        let task_id = staq_after_push.queue[0].id;
+        let expected = snapshot(&state).await;
+
+        sqlx::query("CREATE TRIGGER reject_task_update BEFORE UPDATE ON tasks BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            .execute(&state.pool)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            state
+                .update_task(
+                    Some(1),
+                    task_id,
+                    &TaskUpdateData {
+                        name: "Rejected update".into(),
+                        description: Some("Should roll back".into()),
+                    },
+                )
+                .await,
+            Err(AppStateError::Database(sqlx::Error::Database(_)))
+        ));
+        assert_eq!(snapshot(&state).await, expected);
+        assert_eq!(persisted_snapshot(&state.pool).await, expected);
         state.pool.close().await;
     });
 }
