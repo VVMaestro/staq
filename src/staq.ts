@@ -6,10 +6,11 @@ export interface Task {
   id: number;
   name: string;
   description: string;
-  status: "active" | "completed";
+  status: "active" | "completed" | "cancelled";
   placement: "queue" | "stack";
   staq_id: number | null;
   created_at: string;
+  closed_at: string | null;
 }
 
 export interface StaqSnapshot {
@@ -70,6 +71,10 @@ export function updateTask(
   item: TaskUpdateData,
 ): Promise<StaqSnapshot> {
   return invoke<StaqSnapshot>("staq_update_task", { staqId, taskId, item });
+}
+
+export function cancelTask(staqId: number, taskId: number): Promise<StaqSnapshot> {
+  return invoke<StaqSnapshot>("staq_cancel_task", { staqId, taskId });
 }
 
 export function createStaq(data: CreateStaqData): Promise<StaqSnapshot> {

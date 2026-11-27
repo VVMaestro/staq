@@ -78,6 +78,18 @@ async fn staq_update_task(
 }
 
 #[tauri::command]
+async fn staq_cancel_task(
+    state: tauri::State<'_, AppState>,
+    staq_id: Option<i64>,
+    task_id: i64,
+) -> Result<Staq, String> {
+    state
+        .cancel_task(staq_id, task_id)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 async fn staq_peek(
     state: tauri::State<'_, AppState>,
     staq_id: Option<i64>,
@@ -170,6 +182,7 @@ pub fn run() {
             staq_push_on_stack,
             staq_pop,
             staq_update_task,
+            staq_cancel_task,
             staq_peek,
             staq_create,
             staq_delete,

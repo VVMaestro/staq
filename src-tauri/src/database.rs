@@ -1,5 +1,5 @@
 use crate::staq::{Staq, Task};
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use std::{
@@ -53,14 +53,23 @@ pub struct UpdateTaskData {
     pub description: String,
 }
 
+fn parse_timestamp(value: &str, column: &'static str) -> Result<DateTime<Utc>, sqlx::Error> {
+    DateTime::parse_from_rfc3339(value)
+        .map_err(|error| sqlx::Error::ColumnDecode {
+            index: column.into(),
+            source: Box::new(error),
+        })
+        .map(|timestamp| timestamp.to_utc())
+}
+
 fn decode_task(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
     let created_at: String = row.try_get("created_at")?;
-    let created_at = DateTime::parse_from_rfc3339(&created_at)
-        .map_err(|error| sqlx::Error::ColumnDecode {
-            index: "created_at".into(),
-            source: Box::new(error),
-        })?
-        .to_utc();
+    let created_at = parse_timestamp(&created_at, "created_at")?;
+    let closed_at: Option<String> = row.try_get("closed_at")?;
+    let closed_at = closed_at
+        .as_deref()
+        .map(|value| parse_timestamp(value, "closed_at"))
+        .transpose()?;
 
     Ok(Task {
         id: row.try_get("id")?,
@@ -70,6 +79,7 @@ fn decode_task(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         placement: row.try_get("placement")?,
         staq_id: row.try_get("staq_id")?,
         created_at,
+        closed_at,
     })
 }
 
@@ -87,7 +97,7 @@ pub async fn load_staqs(pool: &SqlitePool) -> Result<Vec<Staq>, sqlx::Error> {
         .await?;
 
     let tasks_rows = sqlx::query(
-        "SELECT id, name, description, status, placement, staq_id, created_at FROM tasks \
+        "SELECT id, name, description, status, placement, staq_id, created_at, closed_at FROM tasks \
              WHERE status = 'active' ORDER BY position ASC, id ASC",
     )
     .fetch_all(pool)
@@ -183,7 +193,7 @@ pub async fn insert_task(pool: &SqlitePool, data: &CreateTaskData) -> Result<Tas
         "INSERT INTO tasks (name, placement, position, description, staq_id) \
          SELECT ?1, ?2, COALESCE(MAX(position), 0) + 1, ?3, ?4 FROM tasks \
          WHERE status = 'active' AND placement = ?2 AND staq_id IS ?4 \
-         RETURNING id, name, placement, description, status, staq_id, created_at",
+         RETURNING id, name, placement, description, status, staq_id, created_at, closed_at",
     )
     .bind(name)
     .bind(placement)
@@ -200,11 +210,35 @@ pub async fn insert_task(pool: &SqlitePool, data: &CreateTaskData) -> Result<Tas
 }
 
 pub async fn complete_task(pool: &SqlitePool, id: i64) -> Result<(), sqlx::Error> {
-    let result =
-        sqlx::query("UPDATE tasks SET status = 'completed' WHERE id = ?1 AND status = 'active'")
-            .bind(id)
-            .execute(pool)
-            .await?;
+    let result = sqlx::query(
+        "UPDATE tasks \
+         SET status = 'completed', closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE id = ?1 AND status = 'active'",
+    )
+    .bind(id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(sqlx::Error::RowNotFound);
+    }
+
+    Ok(())
+}
+
+pub async fn cancel_task(
+    pool: &SqlitePool,
+    id: i64,
+    staq_id: Option<i64>,
+) -> Result<(), sqlx::Error> {
+    let result = sqlx::query(
+        "UPDATE tasks \
+         SET status = 'cancelled', closed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') \
+         WHERE id = ?1 AND status = 'active' AND staq_id IS ?2",
+    )
+    .bind(id)
+    .bind(staq_id)
+    .execute(pool)
+    .await?;
     if result.rows_affected() != 1 {
         return Err(sqlx::Error::RowNotFound);
     }
@@ -216,7 +250,7 @@ pub async fn update_task(pool: &SqlitePool, data: &UpdateTaskData) -> Result<Tas
     let row = sqlx::query(
         "UPDATE tasks SET name = ?1, description = ?2 \
          WHERE id = ?3 AND status = 'active' AND staq_id IS ?4 \
-         RETURNING id, name, placement, description, status, staq_id, created_at",
+         RETURNING id, name, placement, description, status, staq_id, created_at, closed_at",
     )
     .bind(&data.name)
     .bind(&data.description)
@@ -271,12 +305,12 @@ mod tests {
 
             let task_column_count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM pragma_table_info('tasks') \
-                 WHERE name IN ('id', 'name', 'description', 'status', 'placement', 'position', 'created_at', 'staq_id')",
+                 WHERE name IN ('id', 'name', 'description', 'status', 'placement', 'position', 'created_at', 'staq_id', 'closed_at')",
             )
             .fetch_one(&pool)
             .await
             .expect("task columns should be readable");
-            assert_eq!(task_column_count, 8);
+            assert_eq!(task_column_count, 9);
 
             let staq_column_count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM pragma_table_info('staqs') \
@@ -289,12 +323,15 @@ mod tests {
 
             let index_count: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM sqlite_master \
-                 WHERE type = 'index' AND name = 'tasks_status_placement_position_idx'",
+                 WHERE type = 'index' AND name IN ( \
+                     'tasks_status_placement_position_idx', \
+                     'tasks_staq_status_placement_position_idx' \
+                 )",
             )
             .fetch_one(&pool)
             .await
-            .expect("task index should be readable");
-            assert_eq!(index_count, 1);
+            .expect("task indexes should be readable");
+            assert_eq!(index_count, 2);
 
             sqlx::query("INSERT INTO tasks (name, placement, position) VALUES (?1, ?2, ?3)")
                 .bind("First task")
@@ -304,9 +341,17 @@ mod tests {
                 .await
                 .expect("valid task should be inserted");
 
+            sqlx::query(
+                "INSERT INTO tasks (name, status, placement, position, closed_at) \
+                 VALUES ('Cancelled task', 'cancelled', 'queue', 2, '2026-01-03T12:00:00Z')",
+            )
+            .execute(&pool)
+            .await
+            .expect("cancelled status should be accepted");
+
             let invalid_status = sqlx::query(
                 "INSERT INTO tasks (name, status, placement, position) \
-                 VALUES ('Invalid status', 'unknown', 'queue', 2)",
+                 VALUES ('Invalid status', 'unknown', 'queue', 3)",
             )
             .execute(&pool)
             .await;
@@ -392,7 +437,7 @@ mod tests {
             .fetch_all(&reopened_pool)
             .await
             .expect("migration history should be readable");
-            assert_eq!(migration_versions, [1, 2]);
+            assert_eq!(migration_versions, [1, 2, 3]);
 
             reopened_pool.close().await;
         });
@@ -460,7 +505,7 @@ mod tests {
                 .await
                 .expect("database should be upgraded to the second migration");
             let upgraded_tasks = sqlx::query(
-                "SELECT id, name, description, status, placement, position, created_at, staq_id \
+                "SELECT id, name, description, status, placement, position, created_at, staq_id, closed_at \
                  FROM tasks ORDER BY id",
             )
             .fetch_all(&upgraded_pool)
@@ -478,6 +523,7 @@ mod tests {
                     );
                 }
                 assert_eq!(after.get::<Option<i64>, _>("staq_id"), None);
+                assert_eq!(after.get::<Option<String>, _>("closed_at"), None);
             }
 
             let staqs = super::load_staqs(&upgraded_pool)
@@ -509,14 +555,101 @@ mod tests {
             )
             .fetch_all(&reopened_pool)
             .await
-            .expect("both migrations should remain recorded");
-            assert_eq!(versions, [1, 2]);
+            .expect("all migrations should remain recorded");
+            assert_eq!(versions, [1, 2, 3]);
             let saved_staq_id: i64 = sqlx::query_scalar("SELECT staq_id FROM tasks WHERE id = 7")
                 .fetch_one(&reopened_pool)
                 .await
                 .expect("task association should survive reopening");
             assert_eq!(saved_staq_id, staq_id);
             reopened_pool.close().await;
+        });
+    }
+
+    #[test]
+    fn upgrades_second_migration_and_preserves_grouped_tasks_and_cascade() {
+        tauri::async_runtime::block_on(async {
+            let directory = tempfile::tempdir().expect("temporary directory should be created");
+            let database_path = directory.path().join("staq.sqlite3");
+            let migrations = tempfile::tempdir().expect("migration directory should be created");
+            std::fs::write(
+                migrations.path().join("0001_create_tasks.sql"),
+                include_str!("../migrations/0001_create_tasks.sql"),
+            )
+            .expect("first migration should be copied");
+            std::fs::write(
+                migrations.path().join("0002_create_staq_groups.sql"),
+                include_str!("../migrations/0002_create_staq_groups.sql"),
+            )
+            .expect("second migration should be copied");
+
+            let pool = SqlitePoolOptions::new()
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(&database_path)
+                        .create_if_missing(true)
+                        .foreign_keys(true),
+                )
+                .await
+                .expect("v2 database should be opened");
+            Migrator::new(migrations.path())
+                .await
+                .expect("v2 migrations should be loaded")
+                .run(&pool)
+                .await
+                .expect("v2 migrations should be applied");
+
+            let staq_id: i64 = sqlx::query_scalar(
+                "INSERT INTO staqs (name, description) VALUES ('Work', 'Work tasks') RETURNING id",
+            )
+            .fetch_one(&pool)
+            .await
+            .expect("staq should be inserted");
+
+            sqlx::query(
+                "INSERT INTO tasks (id, name, description, status, placement, position, created_at, staq_id) \
+                 VALUES (10, 'Grouped active', 'Details', 'active', 'stack', 1, '2026-02-01T10:00:00Z', ?1), \
+                        (11, 'Grouped done', '', 'completed', 'queue', 2, '2026-02-02T10:00:00Z', ?1), \
+                        (12, 'Default active', '', 'active', 'queue', 1, '2026-02-03T10:00:00Z', NULL)",
+            )
+            .bind(staq_id)
+            .execute(&pool)
+            .await
+            .expect("v2 tasks should be inserted");
+            pool.close().await;
+
+            let upgraded_pool = initialize(&database_path)
+                .await
+                .expect("v2 database should upgrade to v3");
+
+            let closed_values: Vec<Option<String>> =
+                sqlx::query_scalar("SELECT closed_at FROM tasks ORDER BY id")
+                    .fetch_all(&upgraded_pool)
+                    .await
+                    .expect("closed_at should be readable after upgrade");
+            assert_eq!(closed_values, [None, None, None]);
+
+            let staqs = super::load_staqs(&upgraded_pool)
+                .await
+                .expect("upgraded staqs should load");
+            assert_eq!(staqs.len(), 2);
+            assert_eq!(staqs[0].queue[0].id, 12);
+            assert_eq!(staqs[1].stack[0].id, 10);
+
+            // Foreign key ON DELETE CASCADE must survive table rebuild.
+            sqlx::query("DELETE FROM staqs WHERE id = ?1")
+                .bind(staq_id)
+                .execute(&upgraded_pool)
+                .await
+                .expect("staq deletion should succeed");
+            let remaining_ids: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM tasks ORDER BY id")
+                    .fetch_all(&upgraded_pool)
+                    .await
+                    .expect("remaining tasks should be readable");
+            assert_eq!(remaining_ids, [12]);
+
+            upgraded_pool.close().await;
         });
     }
 }

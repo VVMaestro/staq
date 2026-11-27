@@ -6,6 +6,7 @@ use serde::Serialize;
 pub enum TaskStatus {
     Active,
     Completed,
+    Cancelled,
 }
 
 #[derive(Clone, Serialize)]
@@ -17,6 +18,7 @@ pub struct Task {
     pub placement: String,
     pub staq_id: Option<i64>,
     pub created_at: DateTime<Utc>,
+    pub closed_at: Option<DateTime<Utc>>,
 }
 
 impl Task {
@@ -33,6 +35,7 @@ impl Task {
             placement: "queue".into(),
             staq_id: None,
             created_at: Utc::now(),
+            closed_at: None,
         }
     }
 }
@@ -117,6 +120,18 @@ impl Staq {
         task.name = name;
         task.description = description;
         Some(&*task)
+    }
+
+    pub fn remove_task(&mut self, id: i64) -> Option<Task> {
+        if let Some(index) = self.stack.iter().position(|task| task.id == id) {
+            return Some(self.stack.remove(index));
+        }
+
+        if let Some(index) = self.queue.iter().position(|task| task.id == id) {
+            return self.queue.remove(index);
+        }
+
+        None
     }
 
     pub fn serialize(&self) -> String {
@@ -346,5 +361,40 @@ mod tests {
         assert_eq!(value["stack"].as_array().unwrap().len(), 1);
         assert_eq!(value["stack"][0]["id"], 2);
         assert_eq!(value["stack"][0]["name"], "X");
+    }
+
+    #[test]
+    fn remove_task_removes_from_stack_or_queue_preserving_order() {
+        let mut staq = Staq::new(42, None, None);
+        staq.push(Task::new(1, "A".into()));
+        staq.push(Task::new(2, "B".into()));
+        staq.push(Task::new(3, "C".into()));
+        staq.push_on_stack(Task::new(4, "X".into()));
+        staq.push_on_stack(Task::new(5, "Y".into()));
+        staq.push_on_stack(Task::new(6, "Z".into()));
+
+        assert!(staq.remove_task(999).is_none());
+
+        // Remove waiting task from middle of stack.
+        let removed_stack = staq.remove_task(5).expect("stack task should be removed");
+        assert_eq!(removed_stack.name, "Y");
+        assert_eq!(
+            staq.stack.iter().map(|task| task.id).collect::<Vec<_>>(),
+            [4, 6]
+        );
+
+        // Remove waiting task from middle of queue.
+        let removed_queue = staq.remove_task(2).expect("queue task should be removed");
+        assert_eq!(removed_queue.name, "B");
+        assert_eq!(
+            staq.queue.iter().map(|task| task.id).collect::<Vec<_>>(),
+            [1, 3]
+        );
+
+        // Remove current task (top of stack).
+        let removed_current = staq.remove_task(6).expect("current task should be removed");
+        assert_eq!(removed_current.name, "Z");
+        assert_eq!(staq.peek().map(|task| task.id), Some(4));
+        assert!(staq.remove_task(6).is_none());
     }
 }

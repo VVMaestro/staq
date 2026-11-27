@@ -10,6 +10,7 @@ import { useUpdater } from "./useUpdater";
 import { useWindowFrame, windowFrameKey } from "./useWindowFrame";
 import {
   DEFAULT_STAQ_ID,
+  cancelTask,
   createStaq,
   deleteStaq,
   getStaqs,
@@ -87,6 +88,7 @@ const taskDescription = ref("");
 const staqName = ref("");
 const staqDescription = ref("");
 const staqToDeleteId = ref<number | null>(null);
+const openMenuTaskId = ref<number | null>(null);
 const isLoading = ref(true);
 const isBusy = ref(false);
 const hasLoaded = ref(false);
@@ -174,6 +176,7 @@ function focusSwitcher() {
 function selectStaq(id: number) {
   if (isBusy.value) return;
 
+  openMenuTaskId.value = null;
   commandError.value = null;
   selectedStaqId.value = id;
 }
@@ -181,6 +184,7 @@ function selectStaq(id: number) {
 function openCreateTaskDialog(priority: TaskPriority) {
   if (actionsDisabled.value) return;
 
+  openMenuTaskId.value = null;
   commandError.value = null;
   taskDialogState.value = { kind: "create", priority };
   taskName.value = "";
@@ -191,6 +195,7 @@ function openCreateTaskDialog(priority: TaskPriority) {
 function openEditTaskDialog(task: Task, priority: TaskPriority) {
   if (actionsDisabled.value) return;
 
+  openMenuTaskId.value = null;
   commandError.value = null;
   taskDialogState.value = { kind: "edit", taskId: task.id, priority };
   taskName.value = task.name;
@@ -254,6 +259,7 @@ async function handleOpenTaskLink(href: string) {
 async function completeCurrentTask() {
   if (isBusy.value || currentTaskId.value === null) return;
 
+  openMenuTaskId.value = null;
   isBusy.value = true;
   commandError.value = null;
 
@@ -266,9 +272,37 @@ async function completeCurrentTask() {
   }
 }
 
+async function cancelTaskById(taskId: number) {
+  if (isBusy.value) return;
+
+  openMenuTaskId.value = null;
+  isBusy.value = true;
+  commandError.value = null;
+
+  try {
+    replaceStaq(await cancelTask(selectedStaqId.value, taskId));
+  } catch (error) {
+    reportCommandError("Не удалось отменить задачу. Попробуйте ещё раз.", error);
+  } finally {
+    isBusy.value = false;
+  }
+}
+
+function openTaskMenu(taskId: number) {
+  if (actionsDisabled.value) return;
+  openMenuTaskId.value = taskId;
+}
+
+function closeTaskMenu(taskId: number) {
+  if (openMenuTaskId.value === taskId) {
+    openMenuTaskId.value = null;
+  }
+}
+
 function openCreateStaqDialog() {
   if (actionsDisabled.value) return;
 
+  openMenuTaskId.value = null;
   commandError.value = null;
   staqName.value = "";
   staqDescription.value = "";
@@ -298,6 +332,7 @@ async function submitCreateStaq() {
 function openDeleteStaqDialog(target: StaqSnapshot) {
   if (actionsDisabled.value || target.id === DEFAULT_STAQ_ID) return;
 
+  openMenuTaskId.value = null;
   commandError.value = null;
   staqToDeleteId.value = target.id;
   void deleteStaqDialogRef.value?.open(focusSwitcher);
@@ -441,9 +476,13 @@ onMounted(async () => {
                 :urgent="group.priority === 'urgent'"
                 :current="task.id === currentTaskId"
                 :busy="isBusy"
+                :menu-open="openMenuTaskId === task.id"
                 @complete="completeCurrentTask"
                 @edit="openEditTaskDialog(task, group.priority)"
+                @cancel="cancelTaskById(task.id)"
                 @open-link="handleOpenTaskLink"
+                @open-menu="openTaskMenu(task.id)"
+                @close-menu="closeTaskMenu(task.id)"
               />
             </TransitionGroup>
           </div>

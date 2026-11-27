@@ -211,6 +211,28 @@ impl AppState {
         Ok(staq.clone())
     }
 
+    pub async fn cancel_task(
+        &self,
+        staq_id: Option<i64>,
+        task_id: i64,
+    ) -> Result<Staq, AppStateError> {
+        let staq = self.staq(staq_id).await?;
+        let mut staq = staq.lock().await;
+
+        if staq.find_task(task_id).is_none() {
+            return Err(AppStateError::TaskNotFound(task_id));
+        }
+
+        match database::cancel_task(&self.pool, task_id, db_staq_id(staq.id)).await {
+            Ok(()) => {
+                staq.remove_task(task_id);
+                Ok(staq.clone())
+            }
+            Err(sqlx::Error::RowNotFound) => Err(AppStateError::TaskNotFound(task_id)),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     pub async fn create_staq(&self, data: CreateStaqData) -> Result<Staq, AppStateError> {
         let name = data.name.trim();
         if name.is_empty() {
